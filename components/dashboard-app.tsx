@@ -34,6 +34,7 @@ import {
   CardAction,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
@@ -126,6 +127,28 @@ function TrendBars({
   );
 }
 
+function RedditPostLink({
+  story,
+  label = 'Reddit 原帖',
+  className = '',
+}: {
+  story: DashboardStory;
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <a
+      href={story.permalink}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`${label}：${story.originalTitle}`}
+      className={className}
+    >
+      {label} <ExternalLink className="size-3.5 shrink-0" />
+    </a>
+  );
+}
+
 function StoryCard({
   story,
   onSelect,
@@ -209,18 +232,24 @@ function StoryCard({
           )}
         </div>
       </CardContent>
-      <div className="flex items-center justify-between border-t border-border/60 px-4 py-2 sm:px-5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 px-4 py-2 sm:px-5">
         <span className="text-[10px] text-muted-foreground">
           {story.metricsAvailable
             ? `热度速度 ${story.velocity.toFixed(2)}`
             : '依据 RSS 榜位、时效与 ETF 相关性'}
         </span>
-        <button
-          onClick={onSelect}
-          className="flex min-h-8 items-center gap-1 text-xs font-medium text-primary hover:underline"
-        >
-          查看重点 <ChevronRight className="size-3.5" />
-        </button>
+        <div className="flex items-center gap-3">
+          <RedditPostLink
+            story={story}
+            className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-primary hover:underline"
+          />
+          <button
+            onClick={onSelect}
+            className="flex min-h-8 items-center gap-1 text-xs font-medium text-primary hover:underline"
+          >
+            查看重点 <ChevronRight className="size-3.5" />
+          </button>
+        </div>
       </div>
     </Card>
   );
@@ -278,14 +307,11 @@ function StoryDetail({
           </div>
           <TrendBars values={story.trend} />
         </div>
-        <a
-          href={story.permalink}
-          target="_blank"
-          rel="noreferrer"
+        <RedditPostLink
+          story={story}
+          label="打开 Reddit 原帖"
           className="flex min-h-10 items-center justify-between rounded-xl border border-white/10 px-3 text-xs font-medium hover:bg-white/5"
-        >
-          打开 Reddit 原帖 <ExternalLink className="size-3.5" />
-        </a>
+        />
       </CardContent>
     </Card>
   );
@@ -748,6 +774,12 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                             )}
                           </div>
                         </CardContent>
+                        <CardFooter className="justify-end bg-transparent px-4 py-2">
+                          <RedditPostLink
+                            story={story}
+                            className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-primary hover:underline"
+                          />
+                        </CardFooter>
                       </Card>
                     ))
                   ) : (
