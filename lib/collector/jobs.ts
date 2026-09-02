@@ -131,6 +131,9 @@ function jsonPayloadChunks<T>(values: T[]): string[] {
   values.forEach((value) => {
     const serialized = JSON.stringify(value);
     const serializedBytes = encoder.encode(serialized).byteLength;
+    if (serializedBytes + 2 > D1_JSON_PAYLOAD_MAX_BYTES) {
+      throw new Error('Single D1 JSON row exceeds the safe payload limit');
+    }
     const separatorBytes = parts.length ? 1 : 0;
     if (
       parts.length &&
@@ -747,17 +750,7 @@ export async function runHourly(
       statements.push(
         env.DB.prepare(
           `DELETE FROM author_observations
-             WHERE author IN (
-               SELECT author FROM reddit_posts
-               WHERE id IN (SELECT value FROM json_each(?1))
-             )`,
-        ).bind(invalidPayload),
-        env.DB.prepare(
-          `DELETE FROM author_metrics
-             WHERE author IN (
-               SELECT author FROM reddit_posts
-               WHERE id IN (SELECT value FROM json_each(?1))
-             )`,
+             WHERE post_id IN (SELECT value FROM json_each(?1))`,
         ).bind(invalidPayload),
       );
       statements.push(

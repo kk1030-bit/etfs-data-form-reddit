@@ -138,7 +138,7 @@ export async function discoverRedditCandidates(
   if (session.mode === 'rss-preview') return fetchRedditRssCandidates(env);
   const subreddits = parseCsv(env.REDDIT_SUBREDDITS, DEFAULT_SUBREDDITS).slice(
     0,
-    20,
+    8,
   );
   const keywords = parseCsv(env.ETF_KEYWORDS, DEFAULT_ETF_KEYWORDS);
   const listings = ['hot', 'rising', 'top?t=hour'] as const;
