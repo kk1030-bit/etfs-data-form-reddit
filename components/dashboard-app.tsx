@@ -55,7 +55,7 @@ import type {
 type ViewId = 'top' | 'tracking' | 'daily' | 'weekly' | 'authors' | 'status';
 
 const navigation: Array<{ id: ViewId; label: string; icon: typeof Flame }> = [
-  { id: 'top', label: '实时 Top 5', icon: Flame },
+  { id: 'top', label: '本小时 Top 5', icon: Flame },
   { id: 'tracking', label: '24 小时追踪', icon: Activity },
   { id: 'daily', label: '历史日报', icon: History },
   { id: 'weekly', label: '每周报告', icon: BookOpenText },
@@ -113,7 +113,7 @@ function TrendBars({
   return (
     <div
       className={`flex items-end gap-1 ${compact ? 'h-7 w-20' : 'h-16 w-full'}`}
-      aria-label="热度趋势"
+      aria-label="榜单趋势"
     >
       {values.map((value, index) => (
         <span
@@ -162,7 +162,9 @@ function StoryCard({
           <span className="font-mono text-lg font-semibold tabular-nums">
             {Math.round(story.heat)}
           </span>
-          <span className="text-[10px] text-muted-foreground">互动热度</span>
+          <span className="text-[10px] text-muted-foreground">
+            {story.metricsAvailable ? '互动热度' : '榜单指数'}
+          </span>
           <span className="mt-1 text-[10px] font-medium">
             <RankChange story={story} />
           </span>
@@ -189,21 +191,29 @@ function StoryCard({
         </div>
         <div className="flex items-end justify-between gap-4 sm:flex-col sm:items-end">
           <TrendBars values={story.trend.slice(-8)} compact />
-          <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <TrendingUp className="size-3.5" />
-              {compactNumber(story.score)}
+          {story.metricsAvailable ? (
+            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <TrendingUp className="size-3.5" />
+                {compactNumber(story.score)}
+              </span>
+              <span className="flex items-center gap-1">
+                <MessageCircle className="size-3.5" />
+                {compactNumber(story.comments)}
+              </span>
+            </div>
+          ) : (
+            <span className="text-[10px] text-muted-foreground">
+              RSS 不提供互动数字
             </span>
-            <span className="flex items-center gap-1">
-              <MessageCircle className="size-3.5" />
-              {compactNumber(story.comments)}
-            </span>
-          </div>
+          )}
         </div>
       </CardContent>
       <div className="flex items-center justify-between border-t border-border/60 px-4 py-2 sm:px-5">
         <span className="text-[10px] text-muted-foreground">
-          热度速度 {story.velocity.toFixed(2)}
+          {story.metricsAvailable
+            ? `热度速度 ${story.velocity.toFixed(2)}`
+            : '依据 RSS 榜位、时效与 ETF 相关性'}
         </span>
         <button
           onClick={onSelect}
@@ -244,7 +254,7 @@ function StoryDetail({
           三句话看懂
         </CardTitle>
         <CardDescription className="text-white/55">
-          机器翻译，仅供快速阅读
+          标题与短节录的机器翻译，仅供快速阅读
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -261,7 +271,9 @@ function StoryDetail({
         </ol>
         <div className="rounded-xl bg-white/7 p-3">
           <div className="mb-2 flex items-center justify-between text-[10px] text-white/50">
-            <span>24 小时热度</span>
+            <span>
+              {story.metricsAvailable ? '24 小时热度' : '24 小时入榜轨迹'}
+            </span>
             <span>{Math.round(story.heat)}/100</span>
           </div>
           <TrendBars values={story.trend} />
@@ -354,6 +366,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<DashboardStory | null>(null);
   const [isPending, startTransition] = useTransition();
+  const isRssPreview = data.mode === 'rss-preview';
   const filteredStories = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return data.stories;
@@ -453,8 +466,14 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 </div>
               </div>
               <div className="hidden items-center gap-2 text-xs text-muted-foreground lg:flex">
-                <CircleDot className="size-3.5 fill-emerald-500 text-emerald-500" />
-                {data.status === 'healthy' ? '采集器运行正常' : '本轮部分成功'}
+                <CircleDot
+                  className={`size-3.5 ${data.status === 'healthy' ? 'fill-emerald-500 text-emerald-500' : data.status === 'delayed' ? 'fill-amber-500 text-amber-500' : 'fill-sky-500 text-sky-500'}`}
+                />
+                {data.status === 'healthy'
+                  ? '采集器运行正常'
+                  : data.status === 'delayed'
+                    ? '采集延迟，沿用上次成功结果'
+                    : '等待更多小时数据'}
                 <span className="text-border">•</span>数据截至{' '}
                 {formatBeijing(data.updatedAt)}（北京时间）
               </div>
@@ -473,7 +492,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                     data-icon="inline-start"
                     className={isPending ? 'animate-spin' : ''}
                   />
-                  审查更新
+                  刷新数据
                 </Button>
               </div>
             </div>
@@ -502,7 +521,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       仅采集 Reddit
                     </Badge>
                     <Badge variant="outline">
-                      {data.mode === 'demo' ? '演示数据' : '实时数据'}
+                      {data.mode === 'demo'
+                        ? '演示数据'
+                        : isRssPreview
+                          ? 'RSS 预览・私有测试'
+                          : 'OAuth 数据'}
                     </Badge>
                   </div>
                   <h1 className="font-heading text-2xl font-semibold tracking-[-0.035em] sm:text-3xl">
@@ -512,11 +535,17 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   </h1>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
                     {view === 'top'
-                      ? '按互动增速、评论量、作者影响力与 ETF 相关性综合排序，并自动翻译为简体中文。'
+                      ? isRssPreview
+                        ? '按 Reddit RSS 榜单顺序、发布时间与 ETF 相关性排序；RSS 不提供点赞、评论数或浏览量。'
+                        : '按互动增速、评论量、作者影响力与 ETF 相关性综合排序，并自动翻译为简体中文。'
                       : view === 'tracking'
-                        ? '同一帖子跨小时去重，保留最多 24 个小时的热度轨迹。'
+                        ? isRssPreview
+                          ? '同一帖子跨小时去重，记录最多 24 小时的入榜轨迹；未出现在本轮 RSS 不代表已删除。'
+                          : '同一帖子跨小时去重，保留最多 24 个小时的热度轨迹。'
                         : view === 'authors'
-                          ? '热门作者是站内互动影响力估算，并非 Reddit 官方认证身份。'
+                          ? isRssPreview
+                            ? '只统计作者在本采集器中的入榜活跃度，不能据此认定为 KOL。'
+                            : '热门作者是站内互动影响力估算，并非 Reddit 官方认证身份。'
                           : view === 'status'
                             ? '查看发现、验证、排名、翻译与报告各环节的最近状态。'
                             : '所有统计按北京时间自然日归档，原始时间统一以 UTC 保存。'}
@@ -555,11 +584,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                           id="ranking-title"
                           className="text-sm font-semibold"
                         >
-                          实时 Top 5
+                          本小时 Top 5
                         </h2>
                       </div>
                       <span className="text-xs text-muted-foreground">
-                        综合互动热度
+                        {isRssPreview ? 'RSS 榜内优先级' : '综合互动热度'}
                       </span>
                     </div>
                     <div className="space-y-3">
@@ -632,8 +661,8 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                             <Languages className="size-3.5" />
                             翻译说明
                           </div>
-                          机器翻译仅供快速阅读；ETF 代码、数值和 Reddit
-                          原始链接保留原样。
+                          仅翻译标题与 RSS 中可见的短节录；ETF 代码、数值和
+                          Reddit 原始链接保留原样，请以原帖为准。
                         </div>
                       </>
                     )}
@@ -673,25 +702,50 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                                 {Math.round(story.heat)}
                               </p>
                               <p className="text-[10px] text-muted-foreground">
-                                峰值热度
+                                {story.metricsAvailable
+                                  ? '峰值热度'
+                                  : '峰值指数'}
                               </p>
                             </div>
-                            <div>
-                              <p className="font-mono text-base font-semibold">
-                                {story.comments}
-                              </p>
-                              <p className="text-[10px] text-muted-foreground">
-                                最新评论
-                              </p>
-                            </div>
-                            <div>
-                              <p className="font-mono text-base font-semibold">
-                                {story.velocity.toFixed(1)}
-                              </p>
-                              <p className="text-[10px] text-muted-foreground">
-                                最新速度
-                              </p>
-                            </div>
+                            {story.metricsAvailable ? (
+                              <>
+                                <div>
+                                  <p className="font-mono text-base font-semibold">
+                                    {story.comments}
+                                  </p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    最新评论
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="font-mono text-base font-semibold">
+                                    {story.velocity.toFixed(1)}
+                                  </p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    最新速度
+                                  </p>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div>
+                                  <p className="font-mono text-base font-semibold">
+                                    {story.trend.length}
+                                  </p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    入榜观察
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="font-mono text-base font-semibold">
+                                    RSS
+                                  </p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    指标来源
+                                  </p>
+                                </div>
+                              </>
+                            )}
                           </div>
                         </CardContent>
                       </Card>
@@ -711,11 +765,12 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 <Card className="border-0 ring-1 ring-border">
                   <CardHeader>
                     <CardTitle className="text-base font-semibold">
-                      热门作者观察
+                      {isRssPreview ? '活跃作者观察' : '热门作者观察'}
                     </CardTitle>
                     <CardDescription>
-                      依据最近 48 小时全部候选 Reddit ETF
-                      帖子估算，不只统计入榜帖。
+                      {isRssPreview
+                        ? '依据最近 48 小时 RSS 候选与入榜记录计算，只代表本采集器的观察结果。'
+                        : '依据最近 48 小时全部候选 Reddit ETF 帖子估算，不只统计入榜帖。'}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -723,9 +778,13 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       <TableHeader>
                         <TableRow>
                           <TableHead>作者</TableHead>
-                          <TableHead>影响力</TableHead>
+                          <TableHead>
+                            {isRssPreview ? '观察活跃度' : '影响力'}
+                          </TableHead>
                           <TableHead>观察帖子</TableHead>
-                          <TableHead>热门命中率</TableHead>
+                          <TableHead>
+                            {isRssPreview ? '入榜率' : '热门命中率'}
+                          </TableHead>
                           <TableHead>社区数</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -752,10 +811,12 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                     </Table>
                     <div className="mt-5 rounded-xl bg-muted/60 p-4 text-xs leading-5 text-muted-foreground">
                       <strong className="text-foreground">
-                        当前唯一数据来源：Reddit。
+                        当前唯一数据来源：Reddit{' '}
+                        {isRssPreview ? 'RSS' : 'OAuth'}。
                       </strong>{' '}
-                      系统不会把热门作者标成“认证
-                      KOL”，也不会建立跨平台身份画像。
+                      {isRssPreview
+                        ? 'RSS 没有 karma、浏览量或官方 KOL 身份；系统不会据此建立跨平台身份画像。'
+                        : '系统不会把热门作者标成“认证 KOL”，也不会建立跨平台身份画像。'}
                     </div>
                   </CardContent>
                 </Card>
@@ -806,6 +867,18 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   <div className="space-y-4">
                     <Card className="border-0 ring-1 ring-border">
                       <CardHeader>
+                        <CardTitle className="text-sm font-semibold">
+                          采集来源与限制
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="text-xs leading-5 text-muted-foreground">
+                        {isRssPreview
+                          ? 'RSS Preview 每小时只请求一次公开合并 feed。它没有点赞、评论或浏览量；遇到 429 不自动重试，并沿用上次成功榜单。'
+                          : 'OAuth 模式使用 Reddit Data API 的公开帖子与互动指标，不提供可依赖的真实浏览量。'}
+                      </CardContent>
+                    </Card>
+                    <Card className="border-0 ring-1 ring-border">
+                      <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-sm font-semibold">
                           <Clock3 className="size-4 text-primary" />
                           Cloudflare 排程
@@ -840,7 +913,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       </CardHeader>
                       <CardContent className="text-xs leading-5 text-muted-foreground">
                         首次采集 48 小时后清除 Reddit
-                        正文、链接与作者标识；历史页只保留去标识化聚合报告。
+                        短节录、链接与作者标识；历史页只保留去标识化聚合报告。
                       </CardContent>
                     </Card>
                     <Card className="border-0 ring-1 ring-border">

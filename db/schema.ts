@@ -54,6 +54,9 @@ export const postObservations = sqliteTable(
     score: integer('score').notNull(),
     comments: integer('comments').notNull(),
     upvoteRatio: real('upvote_ratio').notNull(),
+    metricsAvailable: integer('metrics_available', { mode: 'boolean' })
+      .notNull()
+      .default(true),
     bestListingRank: integer('best_listing_rank'),
     velocityScore: real('velocity_score').notNull(),
     heatScore: real('heat_score').notNull(),
@@ -69,6 +72,7 @@ export const hourlyRuns = sqliteTable('hourly_runs', {
   startedAtUtc: text('started_at_utc').notNull(),
   completedAtUtc: text('completed_at_utc'),
   status: text('status').notNull(),
+  sourceMode: text('source_mode').notNull().default('oauth'),
   candidateCount: integer('candidate_count').notNull().default(0),
   selectedCount: integer('selected_count').notNull().default(0),
   error: text('error'),

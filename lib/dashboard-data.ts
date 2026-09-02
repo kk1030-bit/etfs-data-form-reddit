@@ -15,6 +15,7 @@ export type DashboardStory = {
   score: number;
   comments: number;
   velocity: number;
+  metricsAvailable: boolean;
   topics: string[];
   permalink: string;
   analysisStatus: string;
@@ -39,7 +40,7 @@ export type DashboardAuthor = {
 };
 
 export type DashboardData = {
-  mode: 'live' | 'demo';
+  mode: 'rss-preview' | 'oauth' | 'demo';
   status: 'healthy' | 'partial' | 'delayed';
   updatedAt: string;
   logicalHour: string;
@@ -77,7 +78,7 @@ function valueString(value: unknown, fallback = ''): string {
     : fallback;
 }
 
-function demoData(): DashboardData {
+export function dashboardPreviewFixture(): DashboardData {
   const now = new Date();
   now.setMinutes(0, 0, 0);
   const iso = now.toISOString();
@@ -171,7 +172,7 @@ function demoData(): DashboardData {
     summary: item[5] as string,
     highlights: [
       item[5] as string,
-      '本卡片为界面演示，接入 Reddit 凭证后会替换为实时结果。',
+      '本卡片仅为界面演示；RSS 首次采集成功后会替换为真实榜单。',
     ],
     subreddit: item[6] as string,
     author: item[7] as string,
@@ -182,6 +183,7 @@ function demoData(): DashboardData {
     score: item[9] as number,
     comments: item[10] as number,
     velocity: item[11] as number,
+    metricsAvailable: true,
     topics: item[12] as string[],
     permalink: 'https://www.reddit.com/',
     analysisStatus: 'demo',
@@ -273,19 +275,80 @@ function demoData(): DashboardData {
   };
 }
 
+function configuredMode(): 'rss-preview' | 'oauth' {
+  const runtime = env as unknown as { REDDIT_SOURCE_MODE?: string };
+  return runtime.REDDIT_SOURCE_MODE?.trim().toLowerCase() === 'oauth'
+    ? 'oauth'
+    : 'rss-preview';
+}
+
+function emptyData(
+  mode: 'rss-preview' | 'oauth',
+  attempt?: { status: string; logical_hour_utc: string } | null,
+): DashboardData {
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+  const attemptStatus = attempt?.status;
+  return {
+    mode,
+    status: attemptStatus === 'failed' ? 'delayed' : 'partial',
+    updatedAt: now.toISOString(),
+    logicalHour: attempt?.logical_hour_utc ?? now.toISOString(),
+    candidateCount: 0,
+    activeTracked: 0,
+    rankSlots24h: 0,
+    uniquePosts24h: 0,
+    completedHours24h: 0,
+    stories: [],
+    trackedStories: [],
+    dailyReports: [],
+    weeklyReports: [],
+    authors: [],
+    pipeline: [
+      {
+        name: mode === 'rss-preview' ? '读取 Reddit RSS' : '发现 Reddit 帖子',
+        status:
+          attemptStatus === 'failed'
+            ? 'failed'
+            : attemptStatus === 'running'
+              ? 'running'
+              : 'waiting',
+      },
+      { name: '来源验证与去重', status: 'waiting' },
+      { name: '榜单与作者观察', status: 'waiting' },
+      { name: '简中翻译与摘要', status: 'waiting' },
+      { name: '发布小时榜单', status: 'waiting' },
+    ],
+  };
+}
+
 export async function getDashboardData(): Promise<DashboardData> {
   try {
-    const latest = await env.DB.prepare(
-      `SELECT logical_hour_utc, completed_at_utc, candidate_count, selected_count
-         FROM hourly_runs WHERE status = 'completed'
-         ORDER BY logical_hour_utc DESC LIMIT 1`,
-    ).first<{
-      logical_hour_utc: string;
-      completed_at_utc: string;
-      candidate_count: number;
-      selected_count: number;
-    }>();
-    if (!latest) return demoData();
+    const [latest, latestAttempt] = await Promise.all([
+      env.DB.prepare(
+        `SELECT logical_hour_utc, completed_at_utc, source_mode,
+                candidate_count, selected_count
+           FROM hourly_runs WHERE status = 'completed'
+           ORDER BY logical_hour_utc DESC LIMIT 1`,
+      ).first<{
+        logical_hour_utc: string;
+        completed_at_utc: string;
+        source_mode: string;
+        candidate_count: number;
+        selected_count: number;
+      }>(),
+      env.DB.prepare(
+        `SELECT logical_hour_utc, completed_at_utc, status
+           FROM hourly_runs ORDER BY logical_hour_utc DESC LIMIT 1`,
+      ).first<{
+        logical_hour_utc: string;
+        completed_at_utc: string | null;
+        status: string;
+      }>(),
+    ]);
+    if (!latest) return emptyData(configuredMode(), latestAttempt);
+    const sourceMode =
+      latest.source_mode === 'rss-preview' ? 'rss-preview' : 'oauth';
     const cutoff24h = new Date(
       Date.parse(latest.logical_hour_utc) - 24 * 60 * 60 * 1_000,
     ).toISOString();
@@ -295,7 +358,7 @@ export async function getDashboardData(): Promise<DashboardData> {
                 p.id, p.title_original, p.title_zh, p.summary_zh,
                 p.highlights_json, p.topics_json, p.subreddit, p.author,
                 p.created_at_utc, p.permalink, p.analysis_status,
-                po.score, po.comments, po.velocity_score
+                po.score, po.comments, po.velocity_score, po.metrics_available
          FROM hourly_rankings hr
          JOIN reddit_posts p ON p.id = hr.post_id
          JOIN post_observations po
@@ -332,7 +395,7 @@ export async function getDashboardData(): Promise<DashboardData> {
          SELECT p.id, p.title_original, p.title_zh, p.summary_zh,
                 p.highlights_json, p.topics_json, p.subreddit, p.author,
                 p.created_at_utc, p.permalink, p.analysis_status,
-                po.score, po.comments, po.velocity_score,
+                po.score, po.comments, po.velocity_score, po.metrics_available,
                 COALESCE(rs.peak_rank, 5) AS peak_rank,
                 COALESCE(rs.peak_heat, po.heat_score) AS peak_heat
          FROM recent_tracking rt
@@ -350,7 +413,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     const trendResult = await env.DB.prepare(
       `SELECT po.post_id, po.heat_score
          FROM post_observations po
-         WHERE po.observed_hour_utc >= ?1
+         WHERE po.observed_hour_utc > ?1
          ORDER BY po.observed_hour_utc ASC`,
     )
       .bind(cutoff24h)
@@ -379,6 +442,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         score: Number(row.score),
         comments: Number(row.comments),
         velocity: Number(row.velocity_score),
+        metricsAvailable: Boolean(row.metrics_available),
         topics: safeJsonArray(row.topics_json),
         permalink: String(row.permalink),
         analysisStatus: String(row.analysis_status),
@@ -402,6 +466,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         score: Number(row.score),
         comments: Number(row.comments),
         velocity: Number(row.velocity_score),
+        metricsAvailable: Boolean(row.metrics_available),
         topics: safeJsonArray(row.topics_json),
         permalink: String(row.permalink),
         analysisStatus: String(row.analysis_status),
@@ -413,9 +478,9 @@ export async function getDashboardData(): Promise<DashboardData> {
       env.DB.prepare(
         `SELECT
              (SELECT COUNT(*) FROM tracking_episodes WHERE status = 'active') AS active_tracked,
-             (SELECT COUNT(*) FROM hourly_rankings WHERE logical_hour_utc >= ?1) AS rank_slots,
-             (SELECT COUNT(DISTINCT post_id) FROM hourly_rankings WHERE logical_hour_utc >= ?1) AS unique_posts,
-             (SELECT COUNT(*) FROM hourly_runs WHERE status = 'completed' AND logical_hour_utc >= ?1) AS completed_hours`,
+             (SELECT COUNT(*) FROM hourly_rankings WHERE logical_hour_utc > ?1) AS rank_slots,
+             (SELECT COUNT(DISTINCT post_id) FROM hourly_rankings WHERE logical_hour_utc > ?1) AS unique_posts,
+             (SELECT COUNT(*) FROM hourly_runs WHERE status = 'completed' AND logical_hour_utc > ?1) AS completed_hours`,
       )
         .bind(cutoff24h)
         .first<Record<string, number>>(),
@@ -451,17 +516,63 @@ export async function getDashboardData(): Promise<DashboardData> {
         };
       });
 
+    const completedHours = Number(counts?.completed_hours ?? 0);
+    const newerAttempt =
+      latestAttempt && latestAttempt.logical_hour_utc > latest.logical_hour_utc
+        ? latestAttempt
+        : null;
+    const stale =
+      Date.now() - Date.parse(latest.completed_at_utc) > 2.5 * 60 * 60 * 1_000;
+    const status: DashboardData['status'] =
+      newerAttempt?.status === 'failed' || stale
+        ? 'delayed'
+        : completedHours >= 23
+          ? 'healthy'
+          : 'partial';
+    const analysisStatus: DashboardData['pipeline'][number]['status'] =
+      stories.some((story) => story.analysisStatus === 'failed')
+        ? 'failed'
+        : stories.some((story) => story.analysisStatus !== 'completed')
+          ? 'waiting'
+          : 'completed';
+    const pipeline: DashboardData['pipeline'] = newerAttempt
+      ? [
+          {
+            name:
+              sourceMode === 'rss-preview'
+                ? '读取 Reddit RSS'
+                : '发现 Reddit 帖子',
+            status: newerAttempt.status === 'failed' ? 'failed' : 'running',
+          },
+          { name: '来源验证与去重', status: 'waiting' },
+          { name: '榜单与作者观察', status: 'waiting' },
+          { name: '简中翻译与摘要', status: 'waiting' },
+          { name: '发布小时榜单', status: 'waiting' },
+        ]
+      : [
+          {
+            name:
+              sourceMode === 'rss-preview'
+                ? '读取 Reddit RSS'
+                : '发现 Reddit 帖子',
+            status: 'completed',
+          },
+          { name: '来源验证与去重', status: 'completed' },
+          { name: '榜单与作者观察', status: 'completed' },
+          { name: '简中翻译与摘要', status: analysisStatus },
+          { name: '发布小时榜单', status: 'completed' },
+        ];
+
     return {
-      mode: 'live',
-      status:
-        Number(counts?.completed_hours ?? 0) >= 23 ? 'healthy' : 'partial',
+      mode: sourceMode,
+      status,
       updatedAt: latest.completed_at_utc,
       logicalHour: latest.logical_hour_utc,
       candidateCount: latest.candidate_count,
       activeTracked: Number(counts?.active_tracked ?? 0),
       rankSlots24h: Number(counts?.rank_slots ?? 0),
       uniquePosts24h: Number(counts?.unique_posts ?? 0),
-      completedHours24h: Number(counts?.completed_hours ?? 0),
+      completedHours24h: completedHours,
       stories,
       trackedStories,
       dailyReports: reports(dailyRows.results ?? [], false),
@@ -473,15 +584,12 @@ export async function getDashboardData(): Promise<DashboardData> {
         hitRate: Number(row.top_hit_rate),
         communities: Number(row.subreddit_count),
       })),
-      pipeline: [
-        { name: '发现 Reddit 帖子', status: 'completed' },
-        { name: '来源验证与去重', status: 'completed' },
-        { name: '热度与作者排名', status: 'completed' },
-        { name: '简中翻译与摘要', status: 'completed' },
-        { name: '发布小时榜单', status: 'completed' },
-      ],
+      pipeline,
     };
   } catch {
-    return demoData();
+    return emptyData(configuredMode(), {
+      status: 'failed',
+      logical_hour_utc: new Date().toISOString(),
+    });
   }
 }

@@ -20,6 +20,7 @@ import {
 } from './core';
 import {
   analyzePost,
+  hasLlmProvider,
   summarizeReport,
   type LlmEnv,
   type ReportAnalysis,
@@ -27,6 +28,7 @@ import {
 import {
   createRedditSession,
   discoverRedditCandidates,
+  redditSourceMode,
   refreshTrackedPosts,
   type RedditEnv,
 } from './reddit';
@@ -60,6 +62,7 @@ export type JobResult = {
   selected?: number;
   candidates?: number;
   reportLabel?: string;
+  sourceMode?: 'rss-preview' | 'oauth';
 };
 
 function errorMessage(error: unknown): string {
@@ -116,6 +119,34 @@ async function rows<T>(statement: D1PreparedStatement): Promise<T[]> {
   return result.results ?? [];
 }
 
+const D1_JSON_PAYLOAD_MAX_BYTES = 180_000;
+
+function jsonPayloadChunks<T>(values: T[]): string[] {
+  if (!values.length) return [];
+  const encoder = new TextEncoder();
+  const chunks: string[] = [];
+  let parts: string[] = [];
+  let byteLength = 2;
+
+  values.forEach((value) => {
+    const serialized = JSON.stringify(value);
+    const serializedBytes = encoder.encode(serialized).byteLength;
+    const separatorBytes = parts.length ? 1 : 0;
+    if (
+      parts.length &&
+      byteLength + separatorBytes + serializedBytes > D1_JSON_PAYLOAD_MAX_BYTES
+    ) {
+      chunks.push(`[${parts.join(',')}]`);
+      parts = [];
+      byteLength = 2;
+    }
+    parts.push(serialized);
+    byteLength += (parts.length > 1 ? 1 : 0) + serializedBytes;
+  });
+  if (parts.length) chunks.push(`[${parts.join(',')}]`);
+  return chunks;
+}
+
 async function loadPreviousState(db: D1Database, logicalHour: string) {
   const previousHour = new Date(
     Date.parse(logicalHour) - 3_600_000,
@@ -126,10 +157,11 @@ async function loadPreviousState(db: D1Database, logicalHour: string) {
       score: number;
       comments: number;
       observed_at_utc: string;
+      best_listing_rank: number | null;
     }>(
       db
         .prepare(
-          `SELECT post_id, score, comments, observed_at_utc
+          `SELECT post_id, score, comments, observed_at_utc, best_listing_rank
            FROM post_observations WHERE observed_hour_utc = ?1`,
         )
         .bind(previousHour),
@@ -153,6 +185,7 @@ async function loadPreviousState(db: D1Database, logicalHour: string) {
           score: row.score,
           comments: row.comments,
           observedAtUtc: row.observed_at_utc,
+          bestListingRank: row.best_listing_rank,
         },
       ]),
     ),
@@ -229,18 +262,50 @@ async function loadExistingPosts(
   );
 }
 
-function postUpsert(
+function postUpserts(
   db: D1Database,
-  candidate: RedditCandidate,
+  candidates: RedditCandidate[],
   observedAt: string,
-): D1PreparedStatement {
-  return db
-    .prepare(
-      `INSERT INTO reddit_posts (
+): D1PreparedStatement[] {
+  const payloads = jsonPayloadChunks(
+    candidates.map((candidate) => ({
+      id: candidate.id,
+      redditId: candidate.redditId,
+      subreddit: candidate.subreddit,
+      author: candidate.author,
+      permalink: candidate.permalink,
+      outboundUrl: candidate.outboundUrl,
+      title: candidate.title,
+      body: candidate.body,
+      contentHash: candidate.contentHash ?? '',
+      createdAtUtc: candidate.createdAtUtc,
+    })),
+  );
+  return payloads.map((payload) =>
+    db
+      .prepare(
+        `INSERT INTO reddit_posts (
          id, reddit_id, subreddit, author, permalink, outbound_url,
          title_original, body_original, content_hash, analysis_status,
          source_platform, created_at_utc, first_seen_at_utc, last_seen_at_utc
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 'reddit', ?10, ?11, ?11)
+       )
+       SELECT
+         json_extract(input.value, '$.id'),
+         json_extract(input.value, '$.redditId'),
+         json_extract(input.value, '$.subreddit'),
+         json_extract(input.value, '$.author'),
+         json_extract(input.value, '$.permalink'),
+         json_extract(input.value, '$.outboundUrl'),
+         json_extract(input.value, '$.title'),
+         json_extract(input.value, '$.body'),
+         json_extract(input.value, '$.contentHash'),
+         'pending',
+         'reddit',
+         json_extract(input.value, '$.createdAtUtc'),
+         ?2,
+         ?2
+       FROM json_each(?1) AS input
+       WHERE true
        ON CONFLICT(id) DO UPDATE SET
          subreddit = excluded.subreddit,
          author = excluded.author,
@@ -255,54 +320,61 @@ function postUpsert(
          content_hash = excluded.content_hash,
          last_seen_at_utc = excluded.last_seen_at_utc,
          deleted_at_utc = NULL`,
-    )
-    .bind(
-      candidate.id,
-      candidate.redditId,
-      candidate.subreddit,
-      candidate.author,
-      candidate.permalink,
-      candidate.outboundUrl,
-      candidate.title,
-      candidate.body,
-      candidate.contentHash ?? '',
-      candidate.createdAtUtc,
-      observedAt,
-    );
+      )
+      .bind(payload, observedAt),
+  );
 }
 
-function observationUpsert(
+function observationUpserts(
   db: D1Database,
-  candidate: ScoredCandidate,
+  candidates: ScoredCandidate[],
   logicalHour: string,
   observedAt: string,
-): D1PreparedStatement {
-  return db
-    .prepare(
-      `INSERT INTO post_observations (
+): D1PreparedStatement[] {
+  const payloads = jsonPayloadChunks(
+    candidates.map((candidate) => ({
+      id: candidate.id,
+      score: candidate.score,
+      comments: candidate.comments,
+      upvoteRatio: candidate.upvoteRatio,
+      metricsAvailable: candidate.metricsAvailable ? 1 : 0,
+      bestListingRank: candidate.bestListingRank,
+      velocityScore: candidate.velocityScore,
+      heatScore: candidate.heatScore,
+    })),
+  );
+  return payloads.map((payload) =>
+    db
+      .prepare(
+        `INSERT INTO post_observations (
          post_id, observed_hour_utc, observed_at_utc, score, comments,
-         upvote_ratio, best_listing_rank, velocity_score, heat_score
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         upvote_ratio, metrics_available, best_listing_rank, velocity_score, heat_score
+       )
+       SELECT
+         json_extract(input.value, '$.id'),
+         ?2,
+         ?3,
+         json_extract(input.value, '$.score'),
+         json_extract(input.value, '$.comments'),
+         json_extract(input.value, '$.upvoteRatio'),
+         json_extract(input.value, '$.metricsAvailable'),
+         json_extract(input.value, '$.bestListingRank'),
+         json_extract(input.value, '$.velocityScore'),
+         json_extract(input.value, '$.heatScore')
+       FROM json_each(?1) AS input
+       WHERE true
        ON CONFLICT(post_id, observed_hour_utc) DO UPDATE SET
          observed_at_utc = excluded.observed_at_utc,
          score = excluded.score,
          comments = excluded.comments,
          upvote_ratio = excluded.upvote_ratio,
+         metrics_available = excluded.metrics_available,
          best_listing_rank = excluded.best_listing_rank,
          velocity_score = excluded.velocity_score,
          heat_score = excluded.heat_score`,
-    )
-    .bind(
-      candidate.id,
-      logicalHour,
-      observedAt,
-      candidate.score,
-      candidate.comments,
-      candidate.upvoteRatio,
-      candidate.bestListingRank,
-      candidate.velocityScore,
-      candidate.heatScore,
-    );
+      )
+      .bind(payload, logicalHour, observedAt),
+  );
 }
 
 async function analyzeSelected(
@@ -310,7 +382,7 @@ async function analyzeSelected(
   selected: ScoredCandidate[],
   existing: Map<string, ExistingPost>,
 ): Promise<void> {
-  if (!env.OPENAI_API_KEY) return;
+  if (!hasLlmProvider(env)) return;
   const targets = selected.filter((candidate) => {
     const prior = existing.get(candidate.id);
     return (
@@ -319,6 +391,16 @@ async function analyzeSelected(
       prior.analysisStatus !== 'completed'
     );
   });
+  const completed: Array<{
+    id: string;
+    contentHash: string;
+    titleZh: string;
+    translationZh: string;
+    summaryZh: string;
+    highlightsJson: string;
+    topicsJson: string;
+  }> = [];
+  const failed: Array<{ id: string; contentHash: string }> = [];
   for (let index = 0; index < targets.length; index += 2) {
     const slice = targets.slice(index, index + 2);
     await Promise.all(
@@ -326,36 +408,74 @@ async function analyzeSelected(
         try {
           const analysis = await analyzePost(env, candidate);
           if (!analysis) return;
-          await env.DB.prepare(
-            `UPDATE reddit_posts SET
-                 title_zh = ?1,
-                 translation_zh = ?2,
-                 summary_zh = ?3,
-                 highlights_json = ?4,
-                 topics_json = ?5,
-                 analysis_status = 'completed'
-               WHERE id = ?6 AND content_hash = ?7`,
-          )
-            .bind(
-              analysis.titleZh,
-              analysis.translationZh,
-              analysis.summaryZh,
-              JSON.stringify(analysis.highlights),
-              JSON.stringify(analysis.topics),
-              candidate.id,
-              candidate.contentHash,
-            )
-            .run();
+          completed.push({
+            id: candidate.id,
+            contentHash: candidate.contentHash ?? '',
+            titleZh: analysis.titleZh,
+            translationZh: analysis.translationZh,
+            summaryZh: analysis.summaryZh,
+            highlightsJson: JSON.stringify(analysis.highlights),
+            topicsJson: JSON.stringify(analysis.topics),
+          });
         } catch {
-          await env.DB.prepare(
-            "UPDATE reddit_posts SET analysis_status = 'failed' WHERE id = ?1",
-          )
-            .bind(candidate.id)
-            .run();
+          failed.push({
+            id: candidate.id,
+            contentHash: candidate.contentHash ?? '',
+          });
         }
       }),
     );
   }
+
+  const statements: D1PreparedStatement[] = [];
+  jsonPayloadChunks(completed).forEach((payload) => {
+    statements.push(
+      env.DB.prepare(
+        `WITH updates AS (
+           SELECT
+             json_extract(input.value, '$.id') AS id,
+             json_extract(input.value, '$.contentHash') AS content_hash,
+             json_extract(input.value, '$.titleZh') AS title_zh,
+             json_extract(input.value, '$.translationZh') AS translation_zh,
+             json_extract(input.value, '$.summaryZh') AS summary_zh,
+             json_extract(input.value, '$.highlightsJson') AS highlights_json,
+             json_extract(input.value, '$.topicsJson') AS topics_json
+           FROM json_each(?1) AS input
+         )
+         UPDATE reddit_posts SET
+           title_zh = (SELECT title_zh FROM updates WHERE updates.id = reddit_posts.id),
+           translation_zh = (SELECT translation_zh FROM updates WHERE updates.id = reddit_posts.id),
+           summary_zh = (SELECT summary_zh FROM updates WHERE updates.id = reddit_posts.id),
+           highlights_json = (SELECT highlights_json FROM updates WHERE updates.id = reddit_posts.id),
+           topics_json = (SELECT topics_json FROM updates WHERE updates.id = reddit_posts.id),
+           analysis_status = 'completed'
+         WHERE EXISTS (
+           SELECT 1 FROM updates
+           WHERE updates.id = reddit_posts.id
+             AND updates.content_hash = reddit_posts.content_hash
+         )`,
+      ).bind(payload),
+    );
+  });
+  jsonPayloadChunks(failed).forEach((payload) => {
+    statements.push(
+      env.DB.prepare(
+        `WITH failures AS (
+           SELECT
+             json_extract(input.value, '$.id') AS id,
+             json_extract(input.value, '$.contentHash') AS content_hash
+           FROM json_each(?1) AS input
+         )
+         UPDATE reddit_posts SET analysis_status = 'failed'
+         WHERE EXISTS (
+           SELECT 1 FROM failures
+           WHERE failures.id = reddit_posts.id
+             AND failures.content_hash = reddit_posts.content_hash
+         )`,
+      ).bind(payload),
+    );
+  });
+  if (statements.length) await env.DB.batch(statements);
 }
 
 function authorObservationUpserts(
@@ -369,32 +489,36 @@ function authorObservationUpserts(
     (candidate): candidate is ScoredCandidate & { author: string } =>
       Boolean(candidate.author),
   );
-  return chunksForD1(values, 6).map((chunk) => {
-    const bindings: Array<string | number> = [];
-    const placeholders = chunk.map((candidate, rowIndex) => {
-      const offset = rowIndex * 6;
-      bindings.push(
-        candidate.author,
-        candidate.id,
-        logicalHour,
-        candidate.subreddit,
-        candidate.heatScore,
-        selectedIds.has(candidate.id) ? 1 : 0,
-      );
-      return `(?${offset + 1}, ?${offset + 2}, ?${offset + 3}, ?${offset + 4}, ?${offset + 5}, ?${offset + 6})`;
-    });
-    return db
+  const payloads = jsonPayloadChunks(
+    values.map((candidate) => ({
+      author: candidate.author,
+      postId: candidate.id,
+      subreddit: candidate.subreddit,
+      peakHeatScore: candidate.heatScore,
+      isTopHit: selectedIds.has(candidate.id) ? 1 : 0,
+    })),
+  );
+  return payloads.map((payload) =>
+    db
       .prepare(
         `INSERT INTO author_observations
           (author, post_id, first_seen_at_utc, subreddit, peak_heat_score, is_top_hit)
-         VALUES ${placeholders.join(',')}
+         SELECT
+           json_extract(input.value, '$.author'),
+           json_extract(input.value, '$.postId'),
+           ?2,
+           json_extract(input.value, '$.subreddit'),
+           json_extract(input.value, '$.peakHeatScore'),
+           json_extract(input.value, '$.isTopHit')
+         FROM json_each(?1) AS input
+         WHERE true
          ON CONFLICT(author, post_id) DO UPDATE SET
            subreddit = excluded.subreddit,
            peak_heat_score = MAX(author_observations.peak_heat_score, excluded.peak_heat_score),
            is_top_hit = MAX(author_observations.is_top_hit, excluded.is_top_hit)`,
       )
-      .bind(...bindings);
-  });
+      .bind(payload, logicalHour),
+  );
 }
 
 async function purgeExpiredUserContent(
@@ -443,27 +567,52 @@ async function refreshAuthorMetrics(
   const cutoff = new Date(
     Date.parse(now) - retentionHours * 3_600_000,
   ).toISOString();
-  const authors = await rows<{
-    author: string;
-    observed_posts: number;
-    top_hits: number;
-    avg_heat: number;
-    subreddit_count: number;
-  }>(
+  await db.batch([
     db
       .prepare(
-        `SELECT author,
-                COUNT(DISTINCT post_id) AS observed_posts,
-                COUNT(DISTINCT CASE WHEN is_top_hit = 1 THEN post_id END) AS top_hits,
-                AVG(peak_heat_score) AS avg_heat,
-                COUNT(DISTINCT subreddit) AS subreddit_count
-         FROM author_observations
-         WHERE first_seen_at_utc > ?1
-         GROUP BY author`,
+        `INSERT INTO author_metrics
+          (author, influence_score, observed_posts, top_hit_rate, subreddit_count, computed_at_utc)
+         SELECT
+           stats.author,
+           ROUND(
+             (
+               0.5 +
+               (
+                 (
+                   0.5 * MIN(1.0, MAX(0.0, stats.avg_heat / 100.0)) +
+                   0.3 * ((stats.top_hits + 1.0) / (stats.observed_posts + 4.0)) +
+                   0.2 * MIN(1.0, stats.subreddit_count / 4.0)
+                 ) - 0.5
+               ) * MIN(1.0, stats.observed_posts / 12.0)
+             ) * 1000.0
+           ) / 1000.0,
+           stats.observed_posts,
+           (stats.top_hits + 1.0) / (stats.observed_posts + 4.0),
+           stats.subreddit_count,
+           ?2
+         FROM (
+           SELECT author,
+                  COUNT(DISTINCT post_id) AS observed_posts,
+                  COUNT(DISTINCT CASE WHEN is_top_hit = 1 THEN post_id END) AS top_hits,
+                  AVG(peak_heat_score) AS avg_heat,
+                  COUNT(DISTINCT subreddit) AS subreddit_count
+           FROM author_observations
+           WHERE first_seen_at_utc > ?1
+           GROUP BY author
+         ) AS stats
+         WHERE true
+         ON CONFLICT(author) DO UPDATE SET
+           influence_score = excluded.influence_score,
+           observed_posts = excluded.observed_posts,
+           top_hit_rate = excluded.top_hit_rate,
+           subreddit_count = excluded.subreddit_count,
+           computed_at_utc = excluded.computed_at_utc
+         WHERE author_metrics.influence_score <> excluded.influence_score
+            OR author_metrics.observed_posts <> excluded.observed_posts
+            OR author_metrics.top_hit_rate <> excluded.top_hit_rate
+            OR author_metrics.subreddit_count <> excluded.subreddit_count`,
       )
-      .bind(cutoff),
-  );
-  const statements: D1PreparedStatement[] = [
+      .bind(cutoff, now),
     db
       .prepare(
         `DELETE FROM author_metrics
@@ -472,38 +621,7 @@ async function refreshAuthorMetrics(
          )`,
       )
       .bind(cutoff),
-  ];
-  authors.forEach((row) => {
-    const hitRate = (row.top_hits + 1) / (row.observed_posts + 4);
-    const average = Math.min(1, Math.max(0, Number(row.avg_heat ?? 0) / 100));
-    const coverage = Math.min(1, Number(row.subreddit_count) / 4);
-    const shrink = Math.min(1, Number(row.observed_posts) / 12);
-    const raw = 0.5 * average + 0.3 * hitRate + 0.2 * coverage;
-    const influence = 0.5 + (raw - 0.5) * shrink;
-    statements.push(
-      db
-        .prepare(
-          `INSERT INTO author_metrics
-            (author, influence_score, observed_posts, top_hit_rate, subreddit_count, computed_at_utc)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-           ON CONFLICT(author) DO UPDATE SET
-             influence_score = excluded.influence_score,
-             observed_posts = excluded.observed_posts,
-             top_hit_rate = excluded.top_hit_rate,
-             subreddit_count = excluded.subreddit_count,
-             computed_at_utc = excluded.computed_at_utc`,
-        )
-        .bind(
-          row.author,
-          Math.round(influence * 1_000) / 1_000,
-          row.observed_posts,
-          hitRate,
-          row.subreddit_count,
-          now,
-        ),
-    );
-  });
-  await db.batch(statements);
+  ]);
 }
 
 export async function runHourly(
@@ -511,6 +629,7 @@ export async function runHourly(
   scheduledAtMs: number,
 ): Promise<JobResult> {
   const logicalHour = logicalHourIso(scheduledAtMs);
+  const sourceMode = redditSourceMode(env);
   const retentionHours = clampRawRetentionHours(
     env.RAW_CONTENT_RETENTION_HOURS,
   );
@@ -522,15 +641,16 @@ export async function runHourly(
   try {
     await env.DB.prepare(
       `INSERT INTO hourly_runs
-          (logical_hour_utc, started_at_utc, status, candidate_count, selected_count)
-         VALUES (?1, ?2, 'running', 0, 0)
+          (logical_hour_utc, started_at_utc, status, source_mode, candidate_count, selected_count)
+         VALUES (?1, ?2, 'running', ?3, 0, 0)
          ON CONFLICT(logical_hour_utc) DO UPDATE SET
            started_at_utc = excluded.started_at_utc,
            completed_at_utc = NULL,
            status = 'running',
+           source_mode = excluded.source_mode,
            error = NULL`,
     )
-      .bind(logicalHour, observedAt)
+      .bind(logicalHour, observedAt, sourceMode)
       .run();
 
     await purgeExpiredUserContent(env.DB, Date.now(), retentionHours);
@@ -541,20 +661,22 @@ export async function runHourly(
       loadActiveTrackers(env.DB, logicalHour),
       loadPreviousState(env.DB, logicalHour),
     ]);
-    const trackedRaw = trackers.length
-      ? await refreshTrackedPosts(
-          env,
-          trackers.map((tracker) => tracker.postId),
-          session,
-        )
-      : [];
+    const trackedRaw =
+      session.mode === 'oauth' && trackers.length
+        ? await refreshTrackedPosts(
+            env,
+            trackers.map((tracker) => tracker.postId),
+            session,
+          )
+        : [];
     const keywords = parseCsv(env.ETF_KEYWORDS, DEFAULT_ETF_KEYWORDS);
     const merged = new Map(
       discovered.map((candidate) => [candidate.id, candidate]),
     );
     const invalidTrackedIds = new Set(
-      trackers.map((tracker) => tracker.postId),
+      session.mode === 'oauth' ? trackers.map((tracker) => tracker.postId) : [],
     );
+    discovered.forEach((candidate) => invalidTrackedIds.delete(candidate.id));
     trackedRaw.forEach((child) => {
       const candidate = normalizeRedditPost(child, 'tracked', 50, keywords);
       const rawId =
@@ -608,13 +730,10 @@ export async function runHourly(
       persisted.map((candidate) => candidate.id),
     );
 
-    const statements: D1PreparedStatement[] = [];
-    persisted.forEach((candidate) => {
-      statements.push(postUpsert(env.DB, candidate, observedAt));
-      statements.push(
-        observationUpsert(env.DB, candidate, logicalHour, observedAt),
-      );
-    });
+    const statements: D1PreparedStatement[] = [
+      ...postUpserts(env.DB, persisted, observedAt),
+      ...observationUpserts(env.DB, persisted, logicalHour, observedAt),
+    ];
     statements.push(
       ...authorObservationUpserts(
         env.DB,
@@ -623,16 +742,23 @@ export async function runHourly(
         logicalHour,
       ),
     );
-    invalidTrackedIds.forEach((id) => {
+    if (invalidTrackedIds.size) {
+      const invalidPayload = JSON.stringify([...invalidTrackedIds]);
       statements.push(
         env.DB.prepare(
           `DELETE FROM author_observations
-             WHERE author = (SELECT author FROM reddit_posts WHERE id = ?1)`,
-        ).bind(id),
+             WHERE author IN (
+               SELECT author FROM reddit_posts
+               WHERE id IN (SELECT value FROM json_each(?1))
+             )`,
+        ).bind(invalidPayload),
         env.DB.prepare(
           `DELETE FROM author_metrics
-             WHERE author = (SELECT author FROM reddit_posts WHERE id = ?1)`,
-        ).bind(id),
+             WHERE author IN (
+               SELECT author FROM reddit_posts
+               WHERE id IN (SELECT value FROM json_each(?1))
+             )`,
+        ).bind(invalidPayload),
       );
       statements.push(
         env.DB.prepare(
@@ -651,10 +777,10 @@ export async function runHourly(
                analysis_status = 'deleted',
                deleted_at_utc = ?1,
                last_seen_at_utc = ?1
-             WHERE id = ?2`,
-        ).bind(observedAt, id),
+             WHERE id IN (SELECT value FROM json_each(?2))`,
+        ).bind(observedAt, invalidPayload),
       );
-    });
+    }
 
     statements.push(
       env.DB.prepare(
@@ -668,34 +794,59 @@ export async function runHourly(
         .map((tracker) => [tracker.postId, tracker]),
     );
     let activeCount = activeByPost.size;
+    const activeTrackerIds: string[] = [];
+    const newTrackers: Array<{
+      id: string;
+      postId: string;
+      expiresAtUtc: string;
+    }> = [];
     selected.forEach((candidate) => {
       const active = activeByPost.get(candidate.id);
       if (active) {
-        statements.push(
-          env.DB.prepare(
-            `UPDATE tracking_episodes
-               SET last_selected_at_utc = ?1, selected_count = selected_count + 1
-               WHERE id = ?2`,
-          ).bind(logicalHour, active.id),
-        );
+        activeTrackerIds.push(active.id);
       } else if (activeCount < MAX_TRACKED_POSTS) {
         const expires = new Date(
           Date.parse(logicalHour) + 24 * 60 * 60 * 1_000,
         ).toISOString();
-        statements.push(
-          env.DB.prepare(
-            `INSERT INTO tracking_episodes
-                (id, post_id, started_at_utc, expires_at_utc, last_selected_at_utc, selected_count, status)
-               VALUES (?1, ?2, ?3, ?4, ?3, 1, 'active')`,
-          ).bind(
-            `${candidate.id}:${logicalHour}`,
-            candidate.id,
-            logicalHour,
-            expires,
-          ),
-        );
+        newTrackers.push({
+          id: `${candidate.id}:${logicalHour}`,
+          postId: candidate.id,
+          expiresAtUtc: expires,
+        });
         activeCount += 1;
       }
+    });
+    if (activeTrackerIds.length) {
+      statements.push(
+        env.DB.prepare(
+          `UPDATE tracking_episodes
+             SET selected_count = CASE
+                   WHEN last_selected_at_utc <> ?1 THEN selected_count + 1
+                   ELSE selected_count
+                 END,
+                 last_selected_at_utc = ?1
+             WHERE id IN (SELECT value FROM json_each(?2))`,
+        ).bind(logicalHour, JSON.stringify(activeTrackerIds)),
+      );
+    }
+    jsonPayloadChunks(newTrackers).forEach((payload) => {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO tracking_episodes
+              (id, post_id, started_at_utc, expires_at_utc, last_selected_at_utc, selected_count, status)
+           SELECT
+             json_extract(input.value, '$.id'),
+             json_extract(input.value, '$.postId'),
+             ?2,
+             json_extract(input.value, '$.expiresAtUtc'),
+             ?2,
+             1,
+             'active'
+           FROM json_each(?1) AS input
+           WHERE true
+           ON CONFLICT(id) DO NOTHING`,
+        ).bind(payload, logicalHour),
+      );
     });
 
     statements.push(
@@ -703,20 +854,28 @@ export async function runHourly(
         'DELETE FROM hourly_rankings WHERE logical_hour_utc = ?1',
       ).bind(logicalHour),
     );
-    selected.forEach((candidate, index) => {
+    jsonPayloadChunks(
+      selected.map((candidate, index) => ({
+        rank: index + 1,
+        postId: candidate.id,
+        heatScore: candidate.heatScore,
+        componentsJson: JSON.stringify(candidate.components),
+        previousRank: candidate.previousRank,
+      })),
+    ).forEach((payload) => {
       statements.push(
         env.DB.prepare(
           `INSERT INTO hourly_rankings
               (logical_hour_utc, rank, post_id, heat_score, components_json, previous_rank)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
-        ).bind(
-          logicalHour,
-          index + 1,
-          candidate.id,
-          candidate.heatScore,
-          JSON.stringify(candidate.components),
-          candidate.previousRank,
-        ),
+           SELECT
+             ?2,
+             json_extract(input.value, '$.rank'),
+             json_extract(input.value, '$.postId'),
+             json_extract(input.value, '$.heatScore'),
+             json_extract(input.value, '$.componentsJson'),
+             json_extract(input.value, '$.previousRank')
+           FROM json_each(?1) AS input`,
+        ).bind(payload, logicalHour),
       );
     });
     statements.push(
@@ -746,6 +905,7 @@ export async function runHourly(
       logicalTimeUtc: logicalHour,
       selected: selected.length,
       candidates: discovered.length,
+      sourceMode,
     };
   } catch (error) {
     const message = errorMessage(error);
@@ -776,6 +936,14 @@ function deidentifiedReport(
     ...value,
     themes: value.themes.filter((theme) => !containsRedditUserHandle(theme)),
   };
+}
+
+function reportSource(
+  env: CollectorEnv,
+): 'reddit_rss_preview' | 'reddit_oauth' {
+  return redditSourceMode(env) === 'rss-preview'
+    ? 'reddit_rss_preview'
+    : 'reddit_oauth';
 }
 
 async function topTopicSignalsForWindow(
@@ -854,6 +1022,7 @@ export async function runDaily(
       ...topicSignals.map((signal) => Number(signal.peak_heat)),
     );
     const facts = {
+      source: reportSource(env),
       reportDate: window.label,
       coverage: `${coverage}/24`,
       topTopics,
@@ -867,7 +1036,7 @@ export async function runDaily(
     const executiveSummary =
       generated?.executiveSummary ||
       (topicSignals.length
-        ? `今日共整理 ${topicSignals.length} 个高互动 ETF 话题，完整度 ${coverage}/24。`
+        ? `今日共整理 ${topicSignals.length} 个入榜 ETF 话题，完整度 ${coverage}/24。`
         : `本日暂无足够数据生成话题摘要，完整度 ${coverage}/24。`);
     const sections = {
       themes: generated?.themes.length
@@ -878,7 +1047,7 @@ export async function runDaily(
         peakHeat,
       },
       missingHours: Math.max(0, 24 - coverage),
-      source: 'reddit',
+      source: reportSource(env),
       privacyVersion: 2,
     };
     await env.DB.prepare(
@@ -1003,6 +1172,7 @@ export async function runWeekly(
       ...new Set(daily.flatMap((report) => report.themes)),
     ].slice(0, 8);
     const facts = {
+      source: reportSource(env),
       weekStart: window.label,
       daysIncluded: daily.length,
       daily,
@@ -1016,7 +1186,7 @@ export async function runWeekly(
     const headline = generated?.headline || `ETF 热门话题周报｜${window.label}`;
     const executiveSummary =
       generated?.executiveSummary ||
-      `本周汇总 ${daily.length} 份 Reddit ETF 日报与 ${Number(activity.unique_posts)} 个互动话题。`;
+      `本周汇总 ${daily.length} 份 Reddit ETF 日报与 ${Number(activity.unique_posts)} 个入榜话题。`;
     const sections = {
       themes: generated?.themes.length ? generated.themes : weeklyThemes,
       dailyCoverage: daily.map((report) => ({
@@ -1028,7 +1198,7 @@ export async function runWeekly(
         rankSlots: Number(activity.rank_slots),
         peakHeat: Number(activity.peak_heat ?? 0),
       },
-      source: 'reddit',
+      source: reportSource(env),
       privacyVersion: 2,
     };
     await env.DB.prepare(

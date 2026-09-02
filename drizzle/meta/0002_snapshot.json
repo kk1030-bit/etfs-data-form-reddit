@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "7c307e97-4ee9-4f01-90c8-6f875adbfc2a",
-  "prevId": "6a308a35-9244-4058-a0f1-41a20da936b4",
+  "id": "85365334-6ca8-4986-8c06-b96b64a3972e",
+  "prevId": "7c307e97-4ee9-4f01-90c8-6f875adbfc2a",
   "tables": {
     "author_metrics": {
       "name": "author_metrics",
@@ -110,26 +110,19 @@
       "indexes": {
         "idx_author_observations_first_seen": {
           "name": "idx_author_observations_first_seen",
-          "columns": [
-            "first_seen_at_utc"
-          ],
+          "columns": ["first_seen_at_utc"],
           "isUnique": false
         },
         "idx_author_observations_author": {
           "name": "idx_author_observations_author",
-          "columns": [
-            "author"
-          ],
+          "columns": ["author"],
           "isUnique": false
         }
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "author_observations_author_post_id_pk": {
-          "columns": [
-            "author",
-            "post_id"
-          ],
+          "columns": ["author", "post_id"],
           "name": "author_observations_author_post_id_pk"
         }
       },
@@ -267,17 +260,12 @@
       "indexes": {
         "uidx_hourly_rankings_hour_post": {
           "name": "uidx_hourly_rankings_hour_post",
-          "columns": [
-            "logical_hour_utc",
-            "post_id"
-          ],
+          "columns": ["logical_hour_utc", "post_id"],
           "isUnique": true
         },
         "idx_hourly_rankings_post": {
           "name": "idx_hourly_rankings_post",
-          "columns": [
-            "post_id"
-          ],
+          "columns": ["post_id"],
           "isUnique": false
         }
       },
@@ -286,12 +274,8 @@
           "name": "hourly_rankings_logical_hour_utc_hourly_runs_logical_hour_utc_fk",
           "tableFrom": "hourly_rankings",
           "tableTo": "hourly_runs",
-          "columnsFrom": [
-            "logical_hour_utc"
-          ],
-          "columnsTo": [
-            "logical_hour_utc"
-          ],
+          "columnsFrom": ["logical_hour_utc"],
+          "columnsTo": ["logical_hour_utc"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -299,22 +283,15 @@
           "name": "hourly_rankings_post_id_reddit_posts_id_fk",
           "tableFrom": "hourly_rankings",
           "tableTo": "reddit_posts",
-          "columnsFrom": [
-            "post_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["post_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "hourly_rankings_logical_hour_utc_rank_pk": {
-          "columns": [
-            "logical_hour_utc",
-            "rank"
-          ],
+          "columns": ["logical_hour_utc", "rank"],
           "name": "hourly_rankings_logical_hour_utc_rank_pk"
         }
       },
@@ -351,6 +328,14 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "source_mode": {
+          "name": "source_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'oauth'"
         },
         "candidate_count": {
           "name": "candidate_count",
@@ -438,18 +423,12 @@
       "indexes": {
         "uidx_job_runs_type_time": {
           "name": "uidx_job_runs_type_time",
-          "columns": [
-            "job_type",
-            "logical_time_utc"
-          ],
+          "columns": ["job_type", "logical_time_utc"],
           "isUnique": true
         },
         "idx_job_runs_status": {
           "name": "idx_job_runs_status",
-          "columns": [
-            "status",
-            "started_at_utc"
-          ],
+          "columns": ["status", "started_at_utc"],
           "isUnique": false
         }
       },
@@ -503,6 +482,14 @@
           "notNull": true,
           "autoincrement": false
         },
+        "metrics_available": {
+          "name": "metrics_available",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
         "best_listing_rank": {
           "name": "best_listing_rank",
           "type": "integer",
@@ -528,9 +515,7 @@
       "indexes": {
         "idx_post_observations_hour": {
           "name": "idx_post_observations_hour",
-          "columns": [
-            "observed_hour_utc"
-          ],
+          "columns": ["observed_hour_utc"],
           "isUnique": false
         }
       },
@@ -539,22 +524,15 @@
           "name": "post_observations_post_id_reddit_posts_id_fk",
           "tableFrom": "post_observations",
           "tableTo": "reddit_posts",
-          "columnsFrom": [
-            "post_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["post_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "post_observations_post_id_observed_hour_utc_pk": {
-          "columns": [
-            "post_id",
-            "observed_hour_utc"
-          ],
+          "columns": ["post_id", "observed_hour_utc"],
           "name": "post_observations_post_id_observed_hour_utc_pk"
         }
       },
@@ -713,30 +691,22 @@
       "indexes": {
         "uidx_reddit_posts_reddit_id": {
           "name": "uidx_reddit_posts_reddit_id",
-          "columns": [
-            "reddit_id"
-          ],
+          "columns": ["reddit_id"],
           "isUnique": true
         },
         "uidx_reddit_posts_permalink": {
           "name": "uidx_reddit_posts_permalink",
-          "columns": [
-            "permalink"
-          ],
+          "columns": ["permalink"],
           "isUnique": true
         },
         "idx_reddit_posts_last_seen": {
           "name": "idx_reddit_posts_last_seen",
-          "columns": [
-            "last_seen_at_utc"
-          ],
+          "columns": ["last_seen_at_utc"],
           "isUnique": false
         },
         "idx_reddit_posts_author": {
           "name": "idx_reddit_posts_author",
-          "columns": [
-            "author"
-          ],
+          "columns": ["author"],
           "isUnique": false
         }
       },
@@ -808,18 +778,12 @@
       "indexes": {
         "idx_tracking_episodes_status_expires": {
           "name": "idx_tracking_episodes_status_expires",
-          "columns": [
-            "status",
-            "expires_at_utc"
-          ],
+          "columns": ["status", "expires_at_utc"],
           "isUnique": false
         },
         "uidx_tracking_episodes_post_start": {
           "name": "uidx_tracking_episodes_post_start",
-          "columns": [
-            "post_id",
-            "started_at_utc"
-          ],
+          "columns": ["post_id", "started_at_utc"],
           "isUnique": true
         }
       },
@@ -828,12 +792,8 @@
           "name": "tracking_episodes_post_id_reddit_posts_id_fk",
           "tableFrom": "tracking_episodes",
           "tableTo": "reddit_posts",
-          "columnsFrom": [
-            "post_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["post_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }

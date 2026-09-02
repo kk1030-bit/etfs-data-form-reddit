@@ -110,6 +110,7 @@ export type RedditCandidate = {
   score: number;
   comments: number;
   upvoteRatio: number;
+  metricsAvailable: boolean;
   bestListingRank: number | null;
   listingKinds: string[];
   relevance: number;
@@ -119,6 +120,7 @@ export type PreviousObservation = {
   score: number;
   comments: number;
   observedAtUtc: string;
+  bestListingRank: number | null;
 };
 
 export type ScoredCandidate = RedditCandidate & {
@@ -302,6 +304,7 @@ export function normalizeRedditPost(
     score: Math.trunc(finiteNumber(data.score)),
     comments: Math.max(0, Math.trunc(finiteNumber(data.num_comments))),
     upvoteRatio: clamp01(finiteNumber(data.upvote_ratio, 0.5)),
+    metricsAvailable: true,
     bestListingRank: listingRank,
     listingKinds: [listingKind],
     relevance,
@@ -318,6 +321,7 @@ export function mergeCandidate(
     score: incoming.score,
     comments: incoming.comments,
     upvoteRatio: incoming.upvoteRatio,
+    metricsAvailable: existing.metricsAvailable && incoming.metricsAvailable,
     bestListingRank:
       existing.bestListingRank === null
         ? incoming.bestListingRank
@@ -337,9 +341,21 @@ function percentileRanks(values: number[]): number[] {
     .map((value, index) => ({ value, index }))
     .sort((a, b) => a.value - b.value);
   const result = Array.from<number>({ length: values.length });
-  indexed.forEach((entry, rank) => {
-    result[entry.index] = rank / (values.length - 1);
-  });
+  let start = 0;
+  while (start < indexed.length) {
+    let end = start;
+    while (
+      end + 1 < indexed.length &&
+      indexed[end + 1].value === indexed[start].value
+    ) {
+      end += 1;
+    }
+    const percentile = (start + end) / 2 / (values.length - 1);
+    for (let index = start; index <= end; index += 1) {
+      result[indexed[index].index] = percentile;
+    }
+    start = end + 1;
+  }
   return result;
 }
 
@@ -352,6 +368,10 @@ export function scoreCandidates(
 ): ScoredCandidate[] {
   const rawVelocity = candidates.map((candidate) => {
     const prior = previous.get(candidate.id);
+    if (!candidate.metricsAvailable) {
+      if (!prior?.bestListingRank || !candidate.bestListingRank) return 0;
+      return prior.bestListingRank - candidate.bestListingRank;
+    }
     const ageHours = Math.max(
       (observedAtMs - Date.parse(candidate.createdAtUtc)) / 3_600_000,
       0.25,
@@ -370,7 +390,9 @@ export function scoreCandidates(
     return Math.log1p(delta / elapsed);
   });
   const rawEngagement = candidates.map((candidate) =>
-    Math.log1p(Math.max(candidate.score, 0) + candidate.comments * 2),
+    candidate.metricsAvailable
+      ? Math.log1p(Math.max(candidate.score, 0) + candidate.comments * 2)
+      : 0,
   );
   const velocityRanks = percentileRanks(rawVelocity);
   const engagementRanks = percentileRanks(rawEngagement);
@@ -381,9 +403,13 @@ export function scoreCandidates(
         (observedAtMs - Date.parse(candidate.createdAtUtc)) / 3_600_000,
         0,
       );
+      const rssPreview = !candidate.metricsAvailable;
+      const rssRankTrend = rssPreview
+        ? clamp01(0.5 + rawVelocity[index] / 20)
+        : velocityRanks[index];
       const components = {
-        velocity: velocityRanks[index],
-        engagement: engagementRanks[index],
+        velocity: rssRankTrend,
+        engagement: rssPreview ? 0 : engagementRanks[index],
         listing: candidate.bestListingRank
           ? clamp01(1 - (candidate.bestListingRank - 1) / 50)
           : 0,
@@ -393,14 +419,20 @@ export function scoreCandidates(
         relevance: clamp01(candidate.relevance),
         freshness: Math.exp(-ageHours / 24),
       };
-      const heatScore =
-        100 *
-        (0.3 * components.velocity +
-          0.22 * components.engagement +
-          0.15 * components.listing +
-          0.13 * components.authorInfluence +
-          0.12 * components.relevance +
-          0.08 * components.freshness);
+      const heatScore = rssPreview
+        ? 100 *
+          (0.55 * components.listing +
+            0.2 * components.relevance +
+            0.15 * components.freshness +
+            0.05 * components.authorInfluence +
+            0.05 * components.velocity)
+        : 100 *
+          (0.3 * components.velocity +
+            0.22 * components.engagement +
+            0.15 * components.listing +
+            0.13 * components.authorInfluence +
+            0.12 * components.relevance +
+            0.08 * components.freshness);
       return {
         ...candidate,
         heatScore: Math.round(heatScore * 10) / 10,

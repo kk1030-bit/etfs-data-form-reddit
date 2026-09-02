@@ -17,6 +17,12 @@ import {
   selectTopStories,
   type RedditCandidate,
 } from '../lib/collector/core.ts';
+import {
+  buildRedditRssUrl,
+  fetchRedditRssCandidates,
+  parseRedditAtomFeed,
+} from '../lib/collector/reddit-rss.ts';
+import { analyzePost, hasLlmProvider } from '../lib/collector/llm.ts';
 
 void test('D1 chunks never exceed the 100 bound-parameter limit', () => {
   assert.deepEqual(
@@ -81,6 +87,7 @@ function candidate(overrides: Partial<RedditCandidate> = {}): RedditCandidate {
     score: 100,
     comments: 20,
     upvoteRatio: 0.9,
+    metricsAvailable: true,
     bestListingRank: 1,
     listingKinds: ['hot'],
     relevance: 0.9,
@@ -320,4 +327,151 @@ void test('markdown cleaner removes control data and bounds prompt size', () => 
   );
   assert.equal(cleaned, 'hello\n\n\nworld');
   assert.ok(cleanRedditMarkdown('x'.repeat(30), 10).length === 10);
+});
+
+const ATOM_FIXTURE = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <author><name>/u/indexer</name></author>
+    <category term="ETFs" label="r/ETFs"/>
+    <content type="html">&lt;!-- SC_OFF --&gt;&lt;div class=&quot;md&quot;&gt;&lt;p&gt;Comparing VTI &amp;amp; VT expense ratios.&lt;/p&gt;&lt;/div&gt;&lt;!-- SC_ON --&gt; &amp;#32; submitted by /u/indexer</content>
+    <id>t3_abc123</id>
+    <link href="https://www.reddit.com/r/ETFs/comments/abc123/example/" />
+    <published>2026-09-02T01:00:00+00:00</published>
+    <title>Which ETF&amp;#39;s allocation works?</title>
+  </entry>
+  <entry>
+    <author><name>/u/indexer</name></author>
+    <category term="ETFs"/>
+    <content type="html"></content>
+    <id>t3_abc123</id>
+    <link href="https://www.reddit.com/r/ETFs/comments/abc123/duplicate/" />
+    <published>2026-09-02T01:00:00+00:00</published>
+    <title>Duplicate ETF entry</title>
+  </entry>
+  <entry>
+    <author><name>/u/attacker</name></author>
+    <category term="ETFs"/>
+    <content type="html"></content>
+    <id>t3_evil1</id>
+    <link href="https://reddit.com.evil.example/r/ETFs/comments/evil1/" />
+    <published>2026-09-02T01:00:00+00:00</published>
+    <title>ETF redirect</title>
+  </entry>
+  <entry>
+    <author><name>/u/gardener</name></author>
+    <category term="gardening"/>
+    <content type="html"></content>
+    <id>t3_irrelevant</id>
+    <link href="https://www.reddit.com/r/gardening/comments/irrelevant/" />
+    <published>2026-09-02T01:00:00+00:00</published>
+    <title>Growing tomatoes</title>
+  </entry>
+</feed>`;
+
+void test('RSS URL is constructed only from subreddit names', () => {
+  assert.equal(
+    buildRedditRssUrl({
+      REDDIT_SUBREDDITS: 'ETFs,investing,https://evil.example',
+      REDDIT_RSS_SORT: 'top',
+    }).toString(),
+    'https://www.reddit.com/r/ETFs+investing/top/.rss?limit=100&t=day',
+  );
+  assert.throws(
+    () => buildRedditRssUrl({ REDDIT_SUBREDDITS: 'https://evil.example' }),
+    /白名单/,
+  );
+});
+
+void test('Atom parser extracts safe ETF entries and cleans encoded HTML', () => {
+  const parsed = parseRedditAtomFeed(ATOM_FIXTURE);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].id, 't3_abc123');
+  assert.equal(parsed[0].title, "Which ETF's allocation works?");
+  assert.equal(parsed[0].body, 'Comparing VTI & VT expense ratios.');
+  assert.equal(parsed[0].metricsAvailable, false);
+  assert.equal(parsed[0].bestListingRank, 1);
+  assert.equal(parsed[0].outboundUrl, null);
+  assert.equal(parsed[0].body.includes('submitted by'), false);
+});
+
+void test('RSS fetch rejects rate limits and non-Atom responses without retrying', async () => {
+  let calls = 0;
+  const limited = (async () => {
+    calls += 1;
+    return new Response('slow down', {
+      status: 429,
+      headers: { 'retry-after': '3600' },
+    });
+  }) as typeof fetch;
+  await assert.rejects(
+    fetchRedditRssCandidates({}, limited),
+    /rate limited.*retry-after=3600/,
+  );
+  assert.equal(calls, 1);
+
+  const html = (async () =>
+    new Response('<html>blocked</html>', {
+      headers: { 'content-type': 'text/html' },
+    })) as typeof fetch;
+  await assert.rejects(fetchRedditRssCandidates({}, html), /content-type/);
+});
+
+void test('RSS fetch never follows a cross-origin redirect', async () => {
+  let calls = 0;
+  const redirected = (async (_input, init) => {
+    calls += 1;
+    assert.equal(init?.redirect, 'manual');
+    return new Response(null, {
+      status: 302,
+      headers: { location: 'https://evil.example/stolen.xml' },
+    });
+  }) as typeof fetch;
+  await assert.rejects(
+    fetchRedditRssCandidates({}, redirected),
+    /redirect target validation failed/,
+  );
+  assert.equal(calls, 1);
+});
+
+void test('RSS candidates use feed ranking without fake engagement percentiles', () => {
+  const base = parseRedditAtomFeed(ATOM_FIXTURE)[0];
+  const ranked = scoreCandidates(
+    [
+      base,
+      {
+        ...base,
+        id: 't3_second',
+        redditId: 'second',
+        author: 'second_author',
+        permalink: 'https://www.reddit.com/r/ETFs/comments/second/',
+        bestListingRank: 20,
+      },
+    ],
+    Date.parse('2026-09-02T02:00:00Z'),
+  );
+  assert.equal(ranked[0].id, 't3_abc123');
+  assert.ok(ranked.every((item) => item.components.engagement === 0));
+});
+
+void test('Workers AI binding adapter parses fenced structured output', async () => {
+  const env = {
+    AI: {
+      async run() {
+        return {
+          response: `\`\`\`json\n${JSON.stringify({
+            title_zh: 'ETF 配置问题',
+            translation_zh: '比较 VTI 与 VT。',
+            summary_zh: '作者比较两种全球配置方式。',
+            highlights: ['关注地区权重', '比较费用与分散度'],
+            topics: ['全球配置', 'VTI 与 VT'],
+          })}\n\`\`\``,
+        };
+      },
+    },
+  };
+  assert.equal(hasLlmProvider(env), true);
+  const analysis = await analyzePost(env, candidate());
+  assert.equal(analysis?.titleZh, 'ETF 配置问题');
+  assert.deepEqual(analysis?.highlights, ['关注地区权重', '比较费用与分散度']);
 });
