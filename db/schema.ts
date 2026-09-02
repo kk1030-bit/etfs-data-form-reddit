@@ -1,0 +1,166 @@
+import { sql } from 'drizzle-orm';
+import {
+  check,
+  index,
+  integer,
+  primaryKey,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core';
+
+export const redditPosts = sqliteTable(
+  'reddit_posts',
+  {
+    id: text('id').primaryKey(),
+    redditId: text('reddit_id').notNull(),
+    subreddit: text('subreddit').notNull(),
+    author: text('author'),
+    permalink: text('permalink').notNull(),
+    outboundUrl: text('outbound_url'),
+    titleOriginal: text('title_original').notNull(),
+    bodyOriginal: text('body_original').notNull().default(''),
+    titleZh: text('title_zh'),
+    translationZh: text('translation_zh'),
+    summaryZh: text('summary_zh'),
+    highlightsJson: text('highlights_json').notNull().default('[]'),
+    topicsJson: text('topics_json').notNull().default('[]'),
+    contentHash: text('content_hash').notNull(),
+    analysisStatus: text('analysis_status').notNull().default('pending'),
+    sourcePlatform: text('source_platform').notNull().default('reddit'),
+    createdAtUtc: text('created_at_utc').notNull(),
+    firstSeenAtUtc: text('first_seen_at_utc').notNull(),
+    lastSeenAtUtc: text('last_seen_at_utc').notNull(),
+    deletedAtUtc: text('deleted_at_utc'),
+  },
+  (table) => [
+    uniqueIndex('uidx_reddit_posts_reddit_id').on(table.redditId),
+    uniqueIndex('uidx_reddit_posts_permalink').on(table.permalink),
+    index('idx_reddit_posts_last_seen').on(table.lastSeenAtUtc),
+    index('idx_reddit_posts_author').on(table.author),
+    check('chk_reddit_posts_source', sql`${table.sourcePlatform} = 'reddit'`),
+  ],
+);
+
+export const postObservations = sqliteTable(
+  'post_observations',
+  {
+    postId: text('post_id')
+      .notNull()
+      .references(() => redditPosts.id, { onDelete: 'cascade' }),
+    observedHourUtc: text('observed_hour_utc').notNull(),
+    observedAtUtc: text('observed_at_utc').notNull(),
+    score: integer('score').notNull(),
+    comments: integer('comments').notNull(),
+    upvoteRatio: real('upvote_ratio').notNull(),
+    bestListingRank: integer('best_listing_rank'),
+    velocityScore: real('velocity_score').notNull(),
+    heatScore: real('heat_score').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.postId, table.observedHourUtc] }),
+    index('idx_post_observations_hour').on(table.observedHourUtc),
+  ],
+);
+
+export const hourlyRuns = sqliteTable('hourly_runs', {
+  logicalHourUtc: text('logical_hour_utc').primaryKey(),
+  startedAtUtc: text('started_at_utc').notNull(),
+  completedAtUtc: text('completed_at_utc'),
+  status: text('status').notNull(),
+  candidateCount: integer('candidate_count').notNull().default(0),
+  selectedCount: integer('selected_count').notNull().default(0),
+  error: text('error'),
+});
+
+export const hourlyRankings = sqliteTable(
+  'hourly_rankings',
+  {
+    logicalHourUtc: text('logical_hour_utc')
+      .notNull()
+      .references(() => hourlyRuns.logicalHourUtc, { onDelete: 'cascade' }),
+    rank: integer('rank').notNull(),
+    postId: text('post_id')
+      .notNull()
+      .references(() => redditPosts.id, { onDelete: 'cascade' }),
+    heatScore: real('heat_score').notNull(),
+    componentsJson: text('components_json').notNull(),
+    previousRank: integer('previous_rank'),
+  },
+  (table) => [
+    primaryKey({ columns: [table.logicalHourUtc, table.rank] }),
+    uniqueIndex('uidx_hourly_rankings_hour_post').on(table.logicalHourUtc, table.postId),
+    index('idx_hourly_rankings_post').on(table.postId),
+  ],
+);
+
+export const trackingEpisodes = sqliteTable(
+  'tracking_episodes',
+  {
+    id: text('id').primaryKey(),
+    postId: text('post_id')
+      .notNull()
+      .references(() => redditPosts.id, { onDelete: 'cascade' }),
+    startedAtUtc: text('started_at_utc').notNull(),
+    expiresAtUtc: text('expires_at_utc').notNull(),
+    lastSelectedAtUtc: text('last_selected_at_utc').notNull(),
+    selectedCount: integer('selected_count').notNull().default(1),
+    status: text('status').notNull().default('active'),
+  },
+  (table) => [
+    index('idx_tracking_episodes_status_expires').on(table.status, table.expiresAtUtc),
+    uniqueIndex('uidx_tracking_episodes_post_start').on(table.postId, table.startedAtUtc),
+  ],
+);
+
+export const authorMetrics = sqliteTable('author_metrics', {
+  author: text('author').primaryKey(),
+  influenceScore: real('influence_score').notNull().default(0.5),
+  observedPosts: integer('observed_posts').notNull().default(0),
+  topHitRate: real('top_hit_rate').notNull().default(0),
+  subredditCount: integer('subreddit_count').notNull().default(0),
+  computedAtUtc: text('computed_at_utc').notNull(),
+});
+
+export const dailyReports = sqliteTable('daily_reports', {
+  reportDate: text('report_date').primaryKey(),
+  periodStartUtc: text('period_start_utc').notNull(),
+  periodEndUtc: text('period_end_utc').notNull(),
+  generatedAtUtc: text('generated_at_utc').notNull(),
+  headline: text('headline').notNull(),
+  executiveSummary: text('executive_summary').notNull(),
+  sectionsJson: text('sections_json').notNull(),
+  coverageSuccess: integer('coverage_success').notNull(),
+  coverageExpected: integer('coverage_expected').notNull().default(24),
+  version: integer('version').notNull().default(1),
+});
+
+export const weeklyReports = sqliteTable('weekly_reports', {
+  weekStartDate: text('week_start_date').primaryKey(),
+  periodStartUtc: text('period_start_utc').notNull(),
+  periodEndUtc: text('period_end_utc').notNull(),
+  generatedAtUtc: text('generated_at_utc').notNull(),
+  headline: text('headline').notNull(),
+  executiveSummary: text('executive_summary').notNull(),
+  sectionsJson: text('sections_json').notNull(),
+  daysIncluded: integer('days_included').notNull(),
+  version: integer('version').notNull().default(1),
+});
+
+export const jobRuns = sqliteTable(
+  'job_runs',
+  {
+    id: text('id').primaryKey(),
+    jobType: text('job_type').notNull(),
+    logicalTimeUtc: text('logical_time_utc').notNull(),
+    startedAtUtc: text('started_at_utc').notNull(),
+    completedAtUtc: text('completed_at_utc'),
+    status: text('status').notNull(),
+    error: text('error'),
+  },
+  (table) => [
+    uniqueIndex('uidx_job_runs_type_time').on(table.jobType, table.logicalTimeUtc),
+    index('idx_job_runs_status').on(table.status, table.startedAtUtc),
+  ],
+);
