@@ -7,7 +7,7 @@ type CronEnv = {
 const CRON_JOB: Record<string, 'hourly' | 'daily' | 'weekly'> = {
   '0 * * * *': 'hourly',
   '0 16 * * *': 'daily',
-  '10 16 * * 0': 'weekly',
+  '10 16 * * SUN': 'weekly',
 };
 
 function json(payload: unknown, status = 200): Response {
