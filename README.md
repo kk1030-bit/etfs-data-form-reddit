@@ -13,7 +13,7 @@
 - ETF 关键词与社区相关性过滤。
 - 互动热度综合：增长速度 30%、当前互动 22%、列表排名 15%、作者影响力 13%、ETF 相关性 12%、新鲜度 8%。
 - 每小时固定最多 5 个排名席位；24 小时最多 120 个席位，同一帖子跨小时只保存一份正文。
-- 热门作者采用 90 天观察样本与贝叶斯式收缩，界面不会把它描述为 Reddit 官方认证 KOL。
+- 热门作者采用最近 48 小时全部候选帖（不只入榜帖）与贝叶斯式收缩，界面不会把它描述为 Reddit 官方认证 KOL。
 - OpenAI Responses API 结构化输出：简体中文标题、译文、摘要、重点与主题标签。
 - D1 保存文章、小时观测、排名、追踪周期、作者指标、日报、周报和可审计作业状态。
 - 作业幂等锁、失败记录、删除同步与默认 48 小时原始内容保留策略。
@@ -86,18 +86,21 @@ Copy-Item .env.example .env.local
 | `OPENAI_API_KEY` | 翻译与摘要；未设置时采集仍可运行，但分析保持待处理 |
 | `OPENAI_MODEL` | 默认 `gpt-5.4-mini`，可以按账户可用模型修改 |
 | `JOB_SECRET` | 网站内部作业端点与 Cron Worker 共用的长随机值 |
-| `RAW_CONTENT_RETENTION_HOURS` | 默认 48；延长前应先取得 Reddit 许可 |
+| `SITE_BYPASS_TOKEN` | 仅 Cron Worker 使用；网站保持私有时，用于通过 Sites 登录门槛 |
+| `RAW_CONTENT_RETENTION_HOURS` | 允许 24–48，默认且最高 48 |
 | `NEXT_PUBLIC_SITE_URL` | 部署后的可信 HTTPS 来源，用于 Open Graph 绝对 URL |
 
 ## Cloudflare 发布顺序
 
 1. 构建并发布网站；D1 migration 位于 `drizzle/`，会和 Site 一起打包。
 2. 在网站运行环境设置上表中的变量和秘密。
-3. 把 `cloudflare/wrangler.collector.jsonc` 的 `SITE_BASE_URL` 改成网站 HTTPS 地址。
-4. 为 Cron Worker 设置与网站相同的秘密并发布：
+3. 确认 `cloudflare/wrangler.collector.jsonc` 的 `SITE_BASE_URL` 与实际网站 HTTPS 地址一致。
+4. 为 Cron Worker 设置与网站相同的作业秘密。若网站保持私有，还需把 Sites bypass token 设置为第二个 Worker secret；公开网站可省略它。
+5. 发布排程 Worker：
 
 ```powershell
 npx wrangler secret put JOB_SECRET --config cloudflare/wrangler.collector.jsonc
+npx wrangler secret put SITE_BYPASS_TOKEN --config cloudflare/wrangler.collector.jsonc
 npm run collector:deploy
 ```
 
@@ -129,7 +132,7 @@ Reddit 目前要求 Data API 使用者取得明确批准并注册 OAuth client�
 
 Reddit API 不提供可依赖的帖子真实浏览量，所以产品统一称为“互动热度”，依据分数、评论数及其增长速度计算。不要把它展示成 impressions 或 views。
 
-默认 48 小时后会清除帖子正文、译文和作者标识，历史页只保留聚合报告。若 Reddit 通知帖子、评论或账户已删除，应同步清除相关原文与衍生内容。永久保存原文、商业化或扩大用途前，请取得 Reddit 的书面许可。此处是工程风险提示，不构成法律意见。
+默认在首次采集 48 小时后清除帖子正文、译文和作者标识，历史页只保留不含标题、作者或帖子 ID 的聚合主题与指标。若 Reddit 通知帖子、评论或账户已删除，应立即清除相关原文、链接与衍生内容。永久保存原文、商业化或扩大用途前，请取得 Reddit 的书面许可。此处是工程风险提示，不构成法律意见。
 
 官方资料：
 

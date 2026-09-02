@@ -1,6 +1,7 @@
 type CronEnv = {
   SITE_BASE_URL: string;
   JOB_SECRET: string;
+  SITE_BYPASS_TOKEN?: string;
 };
 
 const CRON_JOB: Record<string, 'hourly' | 'daily' | 'weekly'> = {
@@ -21,13 +22,17 @@ async function invokeSiteJob(
   const base = new URL(env.SITE_BASE_URL);
   if (base.protocol !== 'https:') throw new Error('SITE_BASE_URL must use HTTPS');
   const url = new URL(`/api/internal/jobs/${kind}`, base);
+  const headers = new Headers({
+    Authorization: `Bearer ${env.JOB_SECRET}`,
+    'X-Scheduled-At': String(scheduledAtMs),
+    'User-Agent': 'etfs-hot-topics-cron/0.1.0',
+  });
+  if (env.SITE_BYPASS_TOKEN) {
+    headers.set('OAI-Sites-Authorization', `Bearer ${env.SITE_BYPASS_TOKEN}`);
+  }
   return fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.JOB_SECRET}`,
-      'X-Scheduled-At': String(scheduledAtMs),
-      'User-Agent': 'etfs-hot-topics-cron/0.1.0',
-    },
+    headers,
     signal: AbortSignal.timeout(14 * 60 * 1_000),
   });
 }

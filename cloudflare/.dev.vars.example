@@ -1,1 +1,2 @@
 JOB_SECRET=replace-with-the-same-long-random-value-used-by-the-site
+SITE_BYPASS_TOKEN=required-when-the-site-remains-private

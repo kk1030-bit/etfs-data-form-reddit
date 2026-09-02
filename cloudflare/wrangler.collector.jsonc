@@ -15,6 +15,6 @@
     ]
   },
   "vars": {
-    "SITE_BASE_URL": "https://REPLACE_WITH_YOUR_SITE_HOST"
+    "SITE_BASE_URL": "https://etfs-hot-topics.wangguancc.chatgpt.site"
   }
 }

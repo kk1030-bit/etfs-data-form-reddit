@@ -90,7 +90,10 @@ export const hourlyRankings = sqliteTable(
   },
   (table) => [
     primaryKey({ columns: [table.logicalHourUtc, table.rank] }),
-    uniqueIndex('uidx_hourly_rankings_hour_post').on(table.logicalHourUtc, table.postId),
+    uniqueIndex('uidx_hourly_rankings_hour_post').on(
+      table.logicalHourUtc,
+      table.postId,
+    ),
     index('idx_hourly_rankings_post').on(table.postId),
   ],
 );
@@ -109,8 +112,14 @@ export const trackingEpisodes = sqliteTable(
     status: text('status').notNull().default('active'),
   },
   (table) => [
-    index('idx_tracking_episodes_status_expires').on(table.status, table.expiresAtUtc),
-    uniqueIndex('uidx_tracking_episodes_post_start').on(table.postId, table.startedAtUtc),
+    index('idx_tracking_episodes_status_expires').on(
+      table.status,
+      table.expiresAtUtc,
+    ),
+    uniqueIndex('uidx_tracking_episodes_post_start').on(
+      table.postId,
+      table.startedAtUtc,
+    ),
   ],
 );
 
@@ -122,6 +131,23 @@ export const authorMetrics = sqliteTable('author_metrics', {
   subredditCount: integer('subreddit_count').notNull().default(0),
   computedAtUtc: text('computed_at_utc').notNull(),
 });
+
+export const authorObservations = sqliteTable(
+  'author_observations',
+  {
+    author: text('author').notNull(),
+    postId: text('post_id').notNull(),
+    firstSeenAtUtc: text('first_seen_at_utc').notNull(),
+    subreddit: text('subreddit').notNull(),
+    peakHeatScore: real('peak_heat_score').notNull(),
+    isTopHit: integer('is_top_hit').notNull().default(0),
+  },
+  (table) => [
+    primaryKey({ columns: [table.author, table.postId] }),
+    index('idx_author_observations_first_seen').on(table.firstSeenAtUtc),
+    index('idx_author_observations_author').on(table.author),
+  ],
+);
 
 export const dailyReports = sqliteTable('daily_reports', {
   reportDate: text('report_date').primaryKey(),
@@ -160,7 +186,10 @@ export const jobRuns = sqliteTable(
     error: text('error'),
   },
   (table) => [
-    uniqueIndex('uidx_job_runs_type_time').on(table.jobType, table.logicalTimeUtc),
+    uniqueIndex('uidx_job_runs_type_time').on(
+      table.jobType,
+      table.logicalTimeUtc,
+    ),
     index('idx_job_runs_status').on(table.status, table.startedAtUtc),
   ],
 );
