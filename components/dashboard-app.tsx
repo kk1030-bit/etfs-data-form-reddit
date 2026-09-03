@@ -56,7 +56,7 @@ import type {
 type ViewId = 'top' | 'tracking' | 'daily' | 'weekly' | 'authors' | 'status';
 
 const navigation: Array<{ id: ViewId; label: string; icon: typeof Flame }> = [
-  { id: 'top', label: '本小时 Top 5', icon: Flame },
+  { id: 'top', label: '最新榜单 Top 5', icon: Flame },
   { id: 'tracking', label: '24 小时追踪', icon: Activity },
   { id: 'daily', label: '历史日报', icon: History },
   { id: 'weekly', label: '每周报告', icon: BookOpenText },
@@ -64,7 +64,11 @@ const navigation: Array<{ id: ViewId; label: string; icon: typeof Flame }> = [
   { id: 'status', label: '运行状态', icon: Gauge },
 ];
 
-function formatBeijing(iso: string, withDate = false): string {
+function formatBeijing(
+  iso: string | null | undefined,
+  withDate = false,
+): string {
+  if (!iso || !Number.isFinite(Date.parse(iso))) return '暂无记录';
   return new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai',
     month: withDate ? '2-digit' : undefined,
@@ -495,11 +499,13 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 <CircleDot
                   className={`size-3.5 ${data.status === 'healthy' ? 'fill-emerald-500 text-emerald-500' : data.status === 'delayed' ? 'fill-amber-500 text-amber-500' : 'fill-sky-500 text-sky-500'}`}
                 />
-                {data.status === 'healthy'
-                  ? '采集器运行正常'
-                  : data.status === 'delayed'
-                    ? '采集延迟，沿用上次成功结果'
-                    : '等待更多小时数据'}
+                {data.cooldownUntil
+                  ? 'Reddit 限流，冷却中'
+                  : data.status === 'healthy'
+                    ? '采集器运行正常'
+                    : data.status === 'delayed'
+                      ? '采集延迟，沿用上次成功结果'
+                      : '等待更多小时数据'}
                 <span className="text-border">•</span>数据截至{' '}
                 {formatBeijing(data.updatedAt)}（北京时间）
               </div>
@@ -518,7 +524,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                     data-icon="inline-start"
                     className={isPending ? 'animate-spin' : ''}
                   />
-                  刷新数据
+                  刷新状态
                 </Button>
               </div>
             </div>
@@ -555,9 +561,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                     </Badge>
                   </div>
                   <h1 className="font-heading text-2xl font-semibold tracking-[-0.035em] sm:text-3xl">
-                    {view === 'top'
-                      ? '本小时最值得关注的 ETF 讨论'
-                      : activeLabel}
+                    {view === 'top' ? '最近成功采集的 ETF 讨论' : activeLabel}
                   </h1>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
                     {view === 'top'
@@ -579,9 +583,12 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 </div>
                 <div className="grid grid-cols-3 gap-2 sm:gap-3">
                   {[
-                    ['候选帖子', String(data.candidateCount)],
+                    [
+                      '上次成功候选',
+                      data.updatedAt ? String(data.candidateCount) : '—',
+                    ],
                     ['24h 席位', `${data.rankSlots24h} / 120`],
-                    ['完整度', `${data.completedHours24h} / 24`],
+                    ['近 24h 成功', `${data.completedHours24h} / 24`],
                   ].map(([label, value]) => (
                     <div
                       key={label}
@@ -598,6 +605,41 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 </div>
               </div>
 
+              {data.cooldownUntil ||
+              data.latestAttempt?.error ||
+              data.statusError ||
+              data.status === 'delayed' ? (
+                <section
+                  aria-label="采集状态提示"
+                  aria-live="polite"
+                  className="mb-5 rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-sm"
+                >
+                  <p className="font-semibold">
+                    {data.cooldownUntil
+                      ? 'Reddit 限流，已暂停请求并进入冷却'
+                      : data.statusError
+                        ? '运行状态暂不可用'
+                        : data.latestAttempt?.error
+                          ? '最近一轮未取得完整新数据'
+                          : '当前展示较早的成功数据'}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {data.statusError ??
+                      data.latestAttempt?.error ??
+                      '没有把旧资料当成本小时的新采集结果。'}
+                    {data.cooldownUntil
+                      ? ` 冷却期间不会请求 Reddit；预计 ${formatBeijing(data.nextRetryAt, true)} 的整点排程恢复尝试（北京时间，不保证届时限流解除）。`
+                      : ''}
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    最后成功：{formatBeijing(data.updatedAt, true)}
+                    ；最新排程检查：
+                    {formatBeijing(data.latestAttempt?.startedAt, true)}。
+                    刷新状态只读取现有记录，不会触发采集。
+                  </p>
+                </section>
+              ) : null}
+
               {view === 'top' ? (
                 <div
                   className={`grid gap-5 ${selected ? 'xl:grid-cols-[minmax(0,1fr)_320px]' : 'xl:grid-cols-[minmax(0,1fr)_300px]'}`}
@@ -610,7 +652,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                           id="ranking-title"
                           className="text-sm font-semibold"
                         >
-                          本小时 Top 5
+                          最新成功榜单 Top 5
                         </h2>
                       </div>
                       <span className="text-xs text-muted-foreground">
@@ -627,7 +669,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                           />
                         ))
                       ) : (
-                        <Empty>没有符合当前搜索条件的帖子。</Empty>
+                        <Empty>
+                          {data.stories.length
+                            ? '没有符合当前搜索条件的帖子。'
+                            : '尚无成功采集的榜单。请查看运行状态；这里不会使用示范资料代替。'}
+                        </Empty>
                       )}
                     </div>
                   </section>
@@ -858,21 +904,70 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   <Card className="border-0 ring-1 ring-border">
                     <CardHeader>
                       <CardTitle className="text-base font-semibold">
-                        最近一轮采集流程
+                        最新排程检查与采集状态
                       </CardTitle>
                       <CardDescription>
-                        逻辑时点 {formatBeijing(data.logicalHour, true)}
+                        本次排程时点：
+                        {formatBeijing(data.latestAttempt?.logicalHour, true)}
+                        ；检查于{' '}
+                        {formatBeijing(data.latestAttempt?.startedAt, true)}
                         （北京时间）
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-1">
+                      <dl className="mb-4 grid gap-3 rounded-xl bg-muted/50 p-4 text-xs sm:grid-cols-2">
+                        <div>
+                          <dt className="text-muted-foreground">
+                            最后成功取得数据
+                          </dt>
+                          <dd className="mt-1 font-medium">
+                            {formatBeijing(data.updatedAt, true)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">
+                            最近实际请求 Reddit RSS
+                          </dt>
+                          <dd className="mt-1 font-medium">
+                            {isRssPreview
+                              ? formatBeijing(data.sourceLastAttemptAt, true)
+                              : '请参阅本次采集状态'}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">
+                            冷却截止（北京时间）
+                          </dt>
+                          <dd className="mt-1 font-medium">
+                            {data.cooldownUntil
+                              ? formatBeijing(data.cooldownUntil, true)
+                              : '无冷却限制'}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground">
+                            状态与近 24h 统计读取于
+                          </dt>
+                          <dd className="mt-1 font-medium">
+                            {formatBeijing(data.checkedAt, true)}
+                          </dd>
+                        </div>
+                      </dl>
+                      {data.latestAttempt?.stage === 'preparing' ||
+                      data.latestAttempt?.stage === 'unknown' ? (
+                        <p className="py-2 text-xs text-muted-foreground">
+                          {data.latestAttempt.status === 'running'
+                            ? '正在准备采集和执行保留清理。'
+                            : '旧记录或准备阶段未提供具体步骤；以下不会推测成 RSS 故障。'}
+                        </p>
+                      ) : null}
                       {data.pipeline.map((step, index) => (
                         <div
                           key={step.name}
                           className="flex min-h-14 items-center gap-4 border-b border-border/60 last:border-0"
                         >
                           <span
-                            className={`grid size-7 place-items-center rounded-full ${step.status === 'completed' ? 'bg-emerald-500/10 text-emerald-600' : step.status === 'running' ? 'bg-primary/10 text-primary' : step.status === 'failed' ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'}`}
+                            className={`grid size-7 place-items-center rounded-full ${step.status === 'completed' ? 'bg-emerald-500/10 text-emerald-600' : step.status === 'running' ? 'bg-primary/10 text-primary' : step.status === 'failed' ? 'bg-destructive/10 text-destructive' : step.status === 'cooldown' ? 'bg-amber-500/10 text-amber-600' : 'bg-muted text-muted-foreground'}`}
                           >
                             {step.status === 'completed' ? (
                               <CheckCircle2 className="size-4" />
@@ -890,7 +985,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                                 ? '处理中'
                                 : step.status === 'failed'
                                   ? '失败'
-                                  : '等待'}
+                                  : step.status === 'cooldown'
+                                    ? '冷却中'
+                                    : step.status === 'not_run'
+                                      ? '未执行'
+                                      : '等待'}
                           </Badge>
                         </div>
                       ))}
@@ -905,7 +1004,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       </CardHeader>
                       <CardContent className="text-xs leading-5 text-muted-foreground">
                         {isRssPreview
-                          ? 'RSS Preview 每小时只请求一次公开合并 feed。它没有点赞、评论或浏览量；遇到 429 不自动重试，并沿用上次成功榜单。'
+                          ? '每小时检查一次；只有冷却结束才请求公开合并 RSS。遇到 429 后按 1、2、4、8、16、24 小时逐步退避，并遵守更长的 Retry-After。冷却期间不补抓、不密集重试，旧榜单明确标记为上次成功资料。RSS 不提供点赞、评论数或浏览量。'
                           : 'OAuth 模式使用 Reddit Data API 的公开帖子与互动指标，不提供可依赖的真实浏览量。'}
                       </CardContent>
                     </Card>

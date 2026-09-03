@@ -7,8 +7,8 @@ import {
   parseCsv,
   type RawRedditPost,
   type RedditCandidate,
-} from './core';
-import { fetchRedditRssCandidates, type RedditRssEnv } from './reddit-rss';
+} from './core.ts';
+import { fetchRedditRssCandidates, type RedditRssEnv } from './reddit-rss.ts';
 
 export type RedditSourceMode = 'rss-preview' | 'oauth';
 

@@ -17,21 +17,24 @@ import {
   type PreviousObservation,
   type RedditCandidate,
   type ScoredCandidate,
-} from './core';
+} from './core.ts';
 import {
   analyzePost,
   hasLlmProvider,
   summarizeReport,
   type LlmEnv,
   type ReportAnalysis,
-} from './llm';
+} from './llm.ts';
 import {
   createRedditSession,
   discoverRedditCandidates,
   redditSourceMode,
   refreshTrackedPosts,
   type RedditEnv,
-} from './reddit';
+} from './reddit.ts';
+import { RedditRssError } from './reddit-rss.ts';
+import { RssDeferredError, withRssCooldown } from './rss-cooldown.ts';
+import type { RunStage } from './collection-status.ts';
 
 export type CollectorEnv = RedditEnv &
   LlmEnv & {
@@ -56,13 +59,16 @@ type ExistingPost = {
 };
 
 export type JobResult = {
-  status: 'completed' | 'skipped';
+  status: 'completed' | 'skipped' | 'cooldown' | 'deferred';
   kind: JobKind;
   logicalTimeUtc: string;
   selected?: number;
   candidates?: number;
   reportLabel?: string;
   sourceMode?: 'rss-preview' | 'oauth';
+  retryAtUtc?: string;
+  upstreamStatus?: number;
+  reason?: string;
 };
 
 function errorMessage(error: unknown): string {
@@ -90,6 +96,11 @@ async function acquireJob(
          status = 'running',
          error = NULL
        WHERE job_runs.status = 'failed'
+          OR (job_runs.status IN ('cooldown', 'deferred') AND EXISTS (
+            SELECT 1 FROM hourly_runs hr
+            WHERE hr.logical_hour_utc = job_runs.logical_time_utc
+              AND hr.retry_at_utc <= excluded.started_at_utc
+          ))
           OR (job_runs.status = 'running' AND job_runs.started_at_utc < ?5)`,
     )
     .bind(id, kind, logicalTimeUtc, now, stale)
@@ -101,7 +112,7 @@ async function finishJob(
   db: D1Database,
   kind: JobKind,
   logicalTimeUtc: string,
-  status: 'completed' | 'failed',
+  status: 'completed' | 'failed' | 'cooldown' | 'deferred',
   error: string | null = null,
 ): Promise<void> {
   await db
@@ -640,27 +651,44 @@ export async function runHourly(
     return { status: 'skipped', kind: 'hourly', logicalTimeUtc: logicalHour };
   }
   const observedAt = new Date().toISOString();
+  let stage: RunStage = 'preparing';
+  const setStage = async (next: RunStage) => {
+    stage = next;
+    await env.DB.prepare(
+      'UPDATE hourly_runs SET stage = ?1 WHERE logical_hour_utc = ?2',
+    )
+      .bind(next, logicalHour)
+      .run();
+  };
 
   try {
     await env.DB.prepare(
       `INSERT INTO hourly_runs
-          (logical_hour_utc, started_at_utc, status, source_mode, candidate_count, selected_count)
-         VALUES (?1, ?2, 'running', ?3, 0, 0)
+          (logical_hour_utc, started_at_utc, status, source_mode, candidate_count, selected_count, stage)
+         VALUES (?1, ?2, 'running', ?3, 0, 0, 'preparing')
          ON CONFLICT(logical_hour_utc) DO UPDATE SET
            started_at_utc = excluded.started_at_utc,
            completed_at_utc = NULL,
            status = 'running',
            source_mode = excluded.source_mode,
-           error = NULL`,
+           error = NULL, stage = 'preparing', upstream_status = NULL, retry_at_utc = NULL,
+           candidate_count = 0, selected_count = 0`,
     )
       .bind(logicalHour, observedAt, sourceMode)
       .run();
 
     await purgeExpiredUserContent(env.DB, Date.now(), retentionHours);
 
+    await setStage('source');
     const session = await createRedditSession(env);
-    const [discovered, trackers, previousState] = await Promise.all([
-      discoverRedditCandidates(env, session),
+    const discovered =
+      session.mode === 'rss-preview'
+        ? await withRssCooldown(env.DB, () =>
+            discoverRedditCandidates(env, session),
+          )
+        : await discoverRedditCandidates(env, session);
+    await setStage('ranking');
+    const [trackers, previousState] = await Promise.all([
       loadActiveTrackers(env.DB, logicalHour),
       loadPreviousState(env.DB, logicalHour),
     ]);
@@ -871,27 +899,24 @@ export async function runHourly(
         ).bind(payload, logicalHour),
       );
     });
-    statements.push(
-      env.DB.prepare(
-        `UPDATE hourly_runs SET
-             completed_at_utc = ?1,
-             status = 'completed',
-             candidate_count = ?2,
-             selected_count = ?3,
-             error = NULL
-           WHERE logical_hour_utc = ?4`,
-      ).bind(
-        new Date().toISOString(),
-        discovered.length,
-        selected.length,
-        logicalHour,
-      ),
-    );
-
+    await setStage('persistence');
     if (statements.length) await env.DB.batch(statements);
+    await env.DB.prepare(
+      'UPDATE hourly_runs SET candidate_count = ?1, selected_count = ?2 WHERE logical_hour_utc = ?3',
+    )
+      .bind(discovered.length, selected.length, logicalHour)
+      .run();
+    await setStage('analysis');
     await analyzeSelected(env, selected, existing);
+    await setStage('publishing');
     await refreshAuthorMetrics(env.DB, observedAt, retentionHours);
     await finishJob(env.DB, 'hourly', logicalHour, 'completed');
+    await env.DB.prepare(
+      `UPDATE hourly_runs SET completed_at_utc = ?1, status = 'completed', stage = 'completed',
+         error = NULL, upstream_status = NULL, retry_at_utc = NULL WHERE logical_hour_utc = ?2`,
+    )
+      .bind(new Date().toISOString(), logicalHour)
+      .run();
     return {
       status: 'completed',
       kind: 'hourly',
@@ -902,13 +927,52 @@ export async function runHourly(
     };
   } catch (error) {
     const message = errorMessage(error);
+    if (error instanceof RssDeferredError) {
+      const status = error.reason === 'rate_limited' ? 'cooldown' : 'deferred';
+      await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE hourly_runs SET status = ?1, completed_at_utc = ?2, error = ?3,
+             stage = 'source', upstream_status = ?4, retry_at_utc = ?5 WHERE logical_hour_utc = ?6`,
+        ).bind(
+          status,
+          new Date().toISOString(),
+          message,
+          status === 'cooldown' ? 429 : null,
+          error.retryAtUtc,
+          logicalHour,
+        ),
+        env.DB.prepare(
+          'UPDATE job_runs SET status = ?1, completed_at_utc = ?2, error = ?3 WHERE id = ?4',
+        ).bind(
+          status,
+          new Date().toISOString(),
+          message,
+          `hourly:${logicalHour}`,
+        ),
+      ]);
+      return {
+        status,
+        kind: 'hourly',
+        logicalTimeUtc: logicalHour,
+        sourceMode,
+        retryAtUtc: error.retryAtUtc,
+        reason: error.reason,
+        ...(status === 'cooldown' ? { upstreamStatus: 429 } : {}),
+      };
+    }
     await Promise.allSettled([
       finishJob(env.DB, 'hourly', logicalHour, 'failed', message),
       env.DB.prepare(
-        `UPDATE hourly_runs SET status = 'failed', completed_at_utc = ?1, error = ?2
-           WHERE logical_hour_utc = ?3`,
+        `UPDATE hourly_runs SET status = 'failed', completed_at_utc = ?1, error = ?2,
+           stage = ?4, upstream_status = ?5 WHERE logical_hour_utc = ?3`,
       )
-        .bind(new Date().toISOString(), message, logicalHour)
+        .bind(
+          new Date().toISOString(),
+          message,
+          logicalHour,
+          stage,
+          error instanceof RedditRssError ? (error.status ?? null) : null,
+        )
         .run(),
     ]);
     throw error;

@@ -76,6 +76,19 @@ export const hourlyRuns = sqliteTable('hourly_runs', {
   candidateCount: integer('candidate_count').notNull().default(0),
   selectedCount: integer('selected_count').notNull().default(0),
   error: text('error'),
+  stage: text('stage').notNull().default('unknown'),
+  upstreamStatus: integer('upstream_status'),
+  retryAtUtc: text('retry_at_utc'),
+});
+
+export const redditSourceState = sqliteTable('reddit_source_state', {
+  source: text('source').primaryKey(),
+  consecutive429: integer('consecutive_429').notNull().default(0),
+  cooldownUntilUtc: text('cooldown_until_utc'),
+  lastAttemptAtUtc: text('last_attempt_at_utc'),
+  lastError: text('last_error'),
+  leaseToken: text('lease_token'),
+  leaseUntilUtc: text('lease_until_utc'),
 });
 
 export const hourlyRankings = sqliteTable(

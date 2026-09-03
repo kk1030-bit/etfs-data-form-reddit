@@ -1,4 +1,17 @@
 import { env } from 'cloudflare:workers';
+import {
+  collectionPipeline,
+  presentAttempt,
+  rollingWindow,
+  type AttemptRow,
+  type CollectionAttempt,
+  type PipelineStep,
+} from './collector/collection-status';
+import { nextHourlyCheck, readRssSourceState } from './collector/rss-cooldown';
+import {
+  LATEST_ATTEMPT_SQL,
+  RECENT_COUNTS_SQL,
+} from './collector/dashboard-queries';
 
 export type DashboardStory = {
   id: string;
@@ -42,8 +55,14 @@ export type DashboardAuthor = {
 export type DashboardData = {
   mode: 'rss-preview' | 'oauth' | 'demo';
   status: 'healthy' | 'partial' | 'delayed';
-  updatedAt: string;
-  logicalHour: string;
+  updatedAt: string | null;
+  logicalHour: string | null;
+  checkedAt: string;
+  latestAttempt: CollectionAttempt | null;
+  cooldownUntil: string | null;
+  nextRetryAt: string | null;
+  sourceLastAttemptAt: string | null;
+  statusError: string | null;
   candidateCount: number;
   activeTracked: number;
   rankSlots24h: number;
@@ -54,10 +73,7 @@ export type DashboardData = {
   dailyReports: DashboardReport[];
   weeklyReports: DashboardReport[];
   authors: DashboardAuthor[];
-  pipeline: Array<{
-    name: string;
-    status: 'completed' | 'running' | 'waiting' | 'failed';
-  }>;
+  pipeline: PipelineStep[];
 };
 
 function safeJsonArray(value: unknown): string[] {
@@ -192,6 +208,12 @@ export function dashboardPreviewFixture(): DashboardData {
 
   return {
     mode: 'demo',
+    checkedAt: iso,
+    latestAttempt: null,
+    cooldownUntil: null,
+    nextRetryAt: null,
+    sourceLastAttemptAt: null,
+    statusError: null,
     status: 'healthy',
     updatedAt: iso,
     logicalHour: iso,
@@ -284,16 +306,23 @@ function configuredMode(): 'rss-preview' | 'oauth' {
 
 function emptyData(
   mode: 'rss-preview' | 'oauth',
-  attempt?: { status: string; logical_hour_utc: string } | null,
+  attempt: CollectionAttempt | null = null,
+  nowMs: number = Date.now(),
 ): DashboardData {
-  const now = new Date();
-  now.setMinutes(0, 0, 0);
   const attemptStatus = attempt?.status;
   return {
     mode,
-    status: attemptStatus === 'failed' ? 'delayed' : 'partial',
-    updatedAt: now.toISOString(),
-    logicalHour: attempt?.logical_hour_utc ?? now.toISOString(),
+    status: ['failed', 'cooldown', 'deferred'].includes(attemptStatus ?? '')
+      ? 'delayed'
+      : 'partial',
+    updatedAt: null,
+    logicalHour: null,
+    checkedAt: new Date(nowMs).toISOString(),
+    latestAttempt: attempt,
+    cooldownUntil: null,
+    nextRetryAt: null,
+    sourceLastAttemptAt: null,
+    statusError: null,
     candidateCount: 0,
     activeTracked: 0,
     rankSlots24h: 0,
@@ -304,27 +333,16 @@ function emptyData(
     dailyReports: [],
     weeklyReports: [],
     authors: [],
-    pipeline: [
-      {
-        name: mode === 'rss-preview' ? '读取 Reddit RSS' : '发现 Reddit 帖子',
-        status:
-          attemptStatus === 'failed'
-            ? 'failed'
-            : attemptStatus === 'running'
-              ? 'running'
-              : 'waiting',
-      },
-      { name: '来源验证与去重', status: 'waiting' },
-      { name: '榜单与作者观察', status: 'waiting' },
-      { name: '简中翻译与摘要', status: 'waiting' },
-      { name: '发布小时榜单', status: 'waiting' },
-    ],
+    pipeline: collectionPipeline(attempt, mode === 'rss-preview'),
   };
 }
 
 export async function getDashboardData(): Promise<DashboardData> {
+  const nowMs = Date.now();
+  const window = rollingWindow(nowMs);
+  const mode = configuredMode();
   try {
-    const [latest, latestAttempt] = await Promise.all([
+    const [latest, attemptRow, rssState] = await Promise.all([
       env.DB.prepare(
         `SELECT logical_hour_utc, completed_at_utc, source_mode,
                 candidate_count, selected_count
@@ -337,21 +355,34 @@ export async function getDashboardData(): Promise<DashboardData> {
         candidate_count: number;
         selected_count: number;
       }>(),
-      env.DB.prepare(
-        `SELECT logical_hour_utc, completed_at_utc, status
-           FROM hourly_runs ORDER BY logical_hour_utc DESC LIMIT 1`,
-      ).first<{
-        logical_hour_utc: string;
-        completed_at_utc: string | null;
-        status: string;
-      }>(),
+      env.DB.prepare(LATEST_ATTEMPT_SQL).first<AttemptRow>(),
+      mode === 'rss-preview'
+        ? readRssSourceState(env.DB)
+        : Promise.resolve(null),
     ]);
-    if (!latest) return emptyData(configuredMode(), latestAttempt);
+    const latestAttempt = presentAttempt(attemptRow, nowMs);
+    const cooldownUntil =
+      rssState?.cooldown_until_utc &&
+      Date.parse(rssState.cooldown_until_utc) > nowMs
+        ? rssState.cooldown_until_utc
+        : null;
+    const health = {
+      checkedAt: window.end,
+      latestAttempt,
+      cooldownUntil,
+      nextRetryAt: nextHourlyCheck(cooldownUntil),
+      sourceLastAttemptAt: rssState?.last_attempt_at_utc ?? null,
+      statusError: null,
+    };
+    if (!latest)
+      return {
+        ...emptyData(mode, latestAttempt, nowMs),
+        ...health,
+        ...(cooldownUntil ? { status: 'delayed' as const } : {}),
+      };
     const sourceMode =
       latest.source_mode === 'rss-preview' ? 'rss-preview' : 'oauth';
-    const cutoff24h = new Date(
-      Date.parse(latest.logical_hour_utc) - 24 * 60 * 60 * 1_000,
-    ).toISOString();
+    const cutoff24h = window.start;
 
     const storyResult = await env.DB.prepare(
       `SELECT hr.rank, hr.previous_rank, hr.heat_score,
@@ -373,7 +404,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       `WITH recent_tracking AS (
            SELECT post_id, MAX(last_selected_at_utc) AS last_selected_at_utc
            FROM tracking_episodes
-           WHERE expires_at_utc > ?1 AND started_at_utc <= ?2
+           WHERE status = 'active' AND expires_at_utc > ?2 AND started_at_utc <= ?2
            GROUP BY post_id
            ORDER BY last_selected_at_utc DESC, post_id ASC
            LIMIT 120
@@ -407,16 +438,16 @@ export async function getDashboardData(): Promise<DashboardData> {
          ORDER BY peak_heat DESC, rt.last_selected_at_utc DESC, p.id ASC
          LIMIT 120`,
     )
-      .bind(cutoff24h, latest.logical_hour_utc)
+      .bind(cutoff24h, window.end)
       .all<Record<string, unknown>>();
 
     const trendResult = await env.DB.prepare(
       `SELECT po.post_id, po.heat_score
          FROM post_observations po
-         WHERE po.observed_hour_utc > ?1
+         WHERE po.observed_hour_utc > ?1 AND po.observed_hour_utc <= ?2
          ORDER BY po.observed_hour_utc ASC`,
     )
-      .bind(cutoff24h)
+      .bind(cutoff24h, window.end)
       .all<{ post_id: string; heat_score: number }>();
     const trends = new Map<string, number[]>();
     for (const row of trendResult.results ?? []) {
@@ -475,14 +506,8 @@ export async function getDashboardData(): Promise<DashboardData> {
     );
 
     const [counts, dailyRows, weeklyRows, authorRows] = await Promise.all([
-      env.DB.prepare(
-        `SELECT
-             (SELECT COUNT(*) FROM tracking_episodes WHERE status = 'active') AS active_tracked,
-             (SELECT COUNT(*) FROM hourly_rankings WHERE logical_hour_utc > ?1) AS rank_slots,
-             (SELECT COUNT(DISTINCT post_id) FROM hourly_rankings WHERE logical_hour_utc > ?1) AS unique_posts,
-             (SELECT COUNT(*) FROM hourly_runs WHERE status = 'completed' AND logical_hour_utc > ?1) AS completed_hours`,
-      )
-        .bind(cutoff24h)
+      env.DB.prepare(RECENT_COUNTS_SQL)
+        .bind(cutoff24h, window.end)
         .first<Record<string, number>>(),
       env.DB.prepare(
         'SELECT * FROM daily_reports ORDER BY report_date DESC LIMIT 14',
@@ -517,14 +542,14 @@ export async function getDashboardData(): Promise<DashboardData> {
       });
 
     const completedHours = Number(counts?.completed_hours ?? 0);
-    const newerAttempt =
-      latestAttempt && latestAttempt.logical_hour_utc > latest.logical_hour_utc
-        ? latestAttempt
-        : null;
     const stale =
-      Date.now() - Date.parse(latest.completed_at_utc) > 2.5 * 60 * 60 * 1_000;
+      nowMs - Date.parse(latest.completed_at_utc) > 2.5 * 60 * 60 * 1_000;
     const status: DashboardData['status'] =
-      newerAttempt?.status === 'failed' || stale
+      ['failed', 'cooldown', 'deferred'].includes(
+        latestAttempt?.status ?? '',
+      ) ||
+      cooldownUntil ||
+      stale
         ? 'delayed'
         : completedHours >= 23
           ? 'healthy'
@@ -535,36 +560,15 @@ export async function getDashboardData(): Promise<DashboardData> {
         : stories.some((story) => story.analysisStatus !== 'completed')
           ? 'waiting'
           : 'completed';
-    const pipeline: DashboardData['pipeline'] = newerAttempt
-      ? [
-          {
-            name:
-              sourceMode === 'rss-preview'
-                ? '读取 Reddit RSS'
-                : '发现 Reddit 帖子',
-            status: newerAttempt.status === 'failed' ? 'failed' : 'running',
-          },
-          { name: '来源验证与去重', status: 'waiting' },
-          { name: '榜单与作者观察', status: 'waiting' },
-          { name: '简中翻译与摘要', status: 'waiting' },
-          { name: '发布小时榜单', status: 'waiting' },
-        ]
-      : [
-          {
-            name:
-              sourceMode === 'rss-preview'
-                ? '读取 Reddit RSS'
-                : '发现 Reddit 帖子',
-            status: 'completed',
-          },
-          { name: '来源验证与去重', status: 'completed' },
-          { name: '榜单与作者观察', status: 'completed' },
-          { name: '简中翻译与摘要', status: analysisStatus },
-          { name: '发布小时榜单', status: 'completed' },
-        ];
+    const pipeline = collectionPipeline(
+      latestAttempt,
+      sourceMode === 'rss-preview',
+      analysisStatus,
+    );
 
     return {
       mode: sourceMode,
+      ...health,
       status,
       updatedAt: latest.completed_at_utc,
       logicalHour: latest.logical_hour_utc,
@@ -587,9 +591,11 @@ export async function getDashboardData(): Promise<DashboardData> {
       pipeline,
     };
   } catch {
-    return emptyData(configuredMode(), {
-      status: 'failed',
-      logical_hour_utc: new Date().toISOString(),
-    });
+    return {
+      ...emptyData(mode, null, nowMs),
+      status: 'delayed',
+      statusError:
+        '暂时无法读取运行状态，请稍后刷新。没有将此错误标记成 Reddit 来源故障。',
+    };
   }
 }
