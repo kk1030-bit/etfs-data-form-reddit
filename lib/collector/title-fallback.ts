@@ -20,6 +20,12 @@ export type TitleFallback = {
   items: TitleIndexItem[];
 };
 
+function usefulTitle(title: string) {
+  return !/^(money|hi|hello|help|question|advice|portfolio)[!?.\s]*$/i.test(
+    title.trim(),
+  );
+}
+
 function xmlText(value: string): string {
   const named: Record<string, string> = {
     amp: '&',
@@ -90,9 +96,7 @@ export function parseTitleIndex(
         continue;
       if (
         !title ||
-        /^(money|hi|hello|help|question|advice|portfolio)[!?.\s]*$/i.test(
-          title,
-        ) ||
+        !usefulTitle(title) ||
         !Number.isFinite(timestamp) ||
         timestamp > now ||
         timestamp < now - 48 * 3600000
@@ -166,7 +170,9 @@ export async function readTitleFallback(
     checkedAt: row.checked_at_utc,
     sourceCount: row.source_count,
     items: (JSON.parse(row.items_json) as TitleIndexItem[]).filter(
-      (item) => Date.parse(item.indexedPublishedAt) > now - 48 * 3600000,
+      (item) =>
+        usefulTitle(item.title) &&
+        Date.parse(item.indexedPublishedAt) > now - 48 * 3600000,
     ),
   };
 }
@@ -262,7 +268,9 @@ export async function enrichSavedTitleFallback(
   if (!row) return { stored: 0, translated: 0 };
   const items = (JSON.parse(row.items_json) as TitleIndexItem[])
     .filter(
-      (item) => Date.parse(item.indexedPublishedAt) > Date.now() - 48 * 3600000,
+      (item) =>
+        usefulTitle(item.title) &&
+        Date.parse(item.indexedPublishedAt) > Date.now() - 48 * 3600000,
     )
     .slice(0, 5);
   for (const item of items) {

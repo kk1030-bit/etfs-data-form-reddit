@@ -810,8 +810,8 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       </div>
                       <p className="mt-2 text-sm leading-6 text-muted-foreground">
                         主来源暂不可用时，从 Google 公开新闻索引筛选 Reddit ETF
-                        标题，按索引标示时间展示最新五条。GitHub 免费排程每小时
-                        :10
+                        标题，按索引标示时间展示最多五条，过滤信息过少的标题。GitHub
+                        免费排程每小时 :10
                         读取，可能延迟。仅有标题，未取得作者、正文和互动数；以下中文是标题概述，不计入正式热门榜、追踪或历史报告。
                       </p>
                       <p className="mt-2 text-xs text-muted-foreground">

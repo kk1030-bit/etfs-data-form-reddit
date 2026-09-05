@@ -562,6 +562,9 @@ async function purgeExpiredUserContent(
   ).toISOString();
   await db.batch([
     db
+      .prepare('DELETE FROM title_index_runs WHERE checked_at_utc <= ?1')
+      .bind(cutoff),
+    db
       .prepare(
         `UPDATE reddit_posts SET
            author = NULL,

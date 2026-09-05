@@ -79,6 +79,7 @@ void test('title fallback validates publisher and link host, decodes text, remov
       item() +
         item() +
         item('Future ETF', now + 10000) +
+        item('MOney', now - 10000) +
         item('Old ETF', now - 49 * 3600000) +
         item('Other ETF', now - 1000, 'https://evil.test') +
         item(
