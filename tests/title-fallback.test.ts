@@ -19,6 +19,34 @@ const item = (
 const feed = (items: string) =>
   `<rss version="2.0"><channel>${items}</channel></rss>`;
 
+void test('external mode skips network, imports once, and rejects empty current feeds', async (t) => {
+  const fixture = testDb();
+  t.after(fixture.close);
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  globalThis.fetch = async () => {
+    throw new Error('Unexpected network request');
+  };
+  const env = { DB: fixture.db, TITLE_INDEX_EXTERNAL: '1' };
+  const hour = logicalHourIso(now);
+  await collectTitleFallback(env, hour);
+  assert.equal(await readTitleFallback(fixture.db), null);
+  await collectTitleFallback(env, hour, feed(''));
+  assert.equal(
+    fixture.sqlite.prepare('SELECT status FROM title_index_runs').get()?.status,
+    'failed',
+  );
+  await collectTitleFallback(env, hour, feed(item()));
+  assert.equal((await readTitleFallback(fixture.db))?.items.length, 1);
+  await collectTitleFallback(env, hour, feed(item('Replacement ETF')));
+  assert.equal(
+    (await readTitleFallback(fixture.db))?.items[0].title,
+    'VOO & VTI',
+  );
+});
+
 void test('title fallback validates publisher and link host, decodes text, removes duplicates, and rejects stale/future data', () => {
   const parsed = parseTitleIndex(
     feed(

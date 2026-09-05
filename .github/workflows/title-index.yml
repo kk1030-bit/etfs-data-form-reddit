@@ -1,0 +1,21 @@
+name: Reddit title index fallback
+on:
+  schedule:
+    - cron: '10 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: reddit-title-index
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read public RSS once and store private title index
+        run: node scripts/collect-title-index.mjs
+        env:
+          TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
+          SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}

@@ -169,28 +169,31 @@ export async function readTitleFallback(
 }
 
 export async function collectTitleFallback(
-  env: LlmEnv & { DB: D1Database },
+  env: LlmEnv & { DB: D1Database; TITLE_INDEX_EXTERNAL?: string },
   logicalHour: string,
+  importedXml?: string,
 ): Promise<void> {
+  if (env.TITLE_INDEX_EXTERNAL === '1' && !importedXml) return;
   const now = new Date().toISOString();
   await env.DB.prepare('DELETE FROM title_index_runs WHERE checked_at_utc < ?1')
     .bind(new Date(Date.now() - 48 * 3600000).toISOString())
     .run();
   const lock = await env.DB.prepare(
-    "INSERT INTO title_index_runs (logical_hour_utc, checked_at_utc, status) VALUES (?1, ?2, 'running') ON CONFLICT(logical_hour_utc) DO NOTHING",
+    "INSERT INTO title_index_runs (logical_hour_utc, checked_at_utc, status) VALUES (?1, ?2, 'running') ON CONFLICT(logical_hour_utc) DO UPDATE SET status = 'running', checked_at_utc = excluded.checked_at_utc, error = NULL WHERE title_index_runs.status = 'failed' AND ?3 = 1",
   )
-    .bind(logicalHour, now)
+    .bind(logicalHour, now, importedXml ? 1 : 0)
     .run();
-  if (!lock.meta.changes) return; // At most one fallback request per logical hour, including failed attempts.
+  if (!lock.meta.changes) return; // Completed hours are immutable; an authenticated import may recover a failed hour.
   try {
     const previous = await readTitleFallback(env.DB);
     const candidates = await withRssCooldown(
       env.DB,
-      fetchTitleIndex,
+      importedXml ? async () => parseTitleIndex(importedXml) : fetchTitleIndex,
       Date.now,
       'google-title-index',
     );
     const items: TitleIndexItem[] = [];
+    if (!candidates.length) throw new Error('No current Reddit titles found');
     for (const candidate of candidates.slice(0, 5)) {
       const id = await sha256Hex(candidate.title + candidate.link);
       const cached = previous?.items.find(

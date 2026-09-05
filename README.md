@@ -25,6 +25,8 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 
 ## 架构
 
+标题备援由本仓库的 GitHub Actions 标准 Ubuntu runner 每小时第 10 分钟读取一次公开 RSS，再经独立密钥送入 Cloudflare。公开仓库使用标准免费 runner；GitHub 排程可能延迟。网站、D1 和翻译仍在 Cloudflare，不依赖本地电脑。密钥仅保存在 Actions secrets 与 Sites 服务端环境。
+
 Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Worker 请求 Arctic Shift、写入 D1，并通过独立密钥访问 Cron Worker 的固定模型 AI 接口。网站和 D1 由 .openai/hosting.json 管理。部署运行不依赖本地电脑、磁盘、浏览器或常驻 Python。
 
 [Crawl4AI](https://github.com/unclecode/crawl4ai) 的 Python/Chromium 没有直接嵌入普通 Worker；项目按本场景将受控来源、清洗、去重与结构化抽取重写为 Workers 兼容 TypeScript。
@@ -54,7 +56,9 @@ Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Wo
 | WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                           |
 | OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                          |
 | JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                   |
-| SITE_BYPASS_TOKEN                            | 仅 Cron，用于通过私有 Sites 门槛                  |
+| SITE_BYPASS_TOKEN                            | Cron 与 GitHub Actions，通过私有 Sites 门槛       |
+| TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的独立标题提交密钥           |
+| TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                |
 | RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                    |
 | NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                             |
 | REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET      | 仅审批通过后的 OAuth 模式                         |
@@ -63,10 +67,11 @@ Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Wo
 
 ## 排程
 
-| Cron（UTC）   | 北京时间     | 作业         |
-| ------------- | ------------ | ------------ |
-| 0 * * * *     | 每小时整点   | 前五篇与追踪 |
-| 0 16 * * *    | 每日 00:00   | 日报         |
-| 10 16 * * SUN | 每周一 00:10 | 周报         |
+| Cron（UTC）   | 北京时间     | 作业            |
+| ------------- | ------------ | --------------- |
+| 0 * * * *     | 每小时整点   | 前五篇与追踪    |
+| 0 16 * * *    | 每日 00:00   | 日报            |
+| 10 16 * * SUN | 每周一 00:10 | 周报            |
+| 10 * * * *    | 每小时 :10   | GitHub 标题备援 |
 
 参考：[Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)、[索引字段说明](https://github.com/ArthurHeitmann/arctic_shift/blob/master/file_content_explanations.md)、[Workers AI 免费额度](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。

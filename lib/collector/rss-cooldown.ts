@@ -170,7 +170,11 @@ export async function withRssCooldown<T>(
       .run();
     return result;
   } catch (error) {
-    if (error instanceof RedditRssError && error.status === 429) {
+    if (
+      error instanceof RedditRssError &&
+      (error.status === 429 ||
+        (error.status === 503 && Boolean(error.retryAfter)))
+    ) {
       const count = Number(state?.consecutive_429 ?? 0) + 1;
       const deadline = cooldownDeadline(now(), count, error.retryAfter);
       await db
