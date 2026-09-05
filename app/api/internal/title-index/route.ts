@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import {
   collectTitleFallback,
+  enrichSavedTitleFallback,
   type TitleIndexItem,
 } from '@/lib/collector/title-fallback';
 import { logicalHourIso } from '@/lib/collector/core';
@@ -75,9 +76,12 @@ export async function POST(request: Request) {
   if (request.headers.get('content-type')?.includes('application/json')) {
     try {
       const failure = JSON.parse(body) as {
+        action?: string;
         status?: number;
         retryAfter?: string;
       };
+      if (failure.action === 'translate')
+        return json(await enrichSavedTitleFallback(runtime));
       if (failure.status !== 429 && failure.status !== 503)
         return json({ error: 'Invalid failure' }, 400);
       try {

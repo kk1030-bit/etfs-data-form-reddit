@@ -1,5 +1,5 @@
 import { cleanRedditMarkdown, sha256Hex } from './core.ts';
-import { analyzePost, hasLlmProvider, type LlmEnv } from './llm.ts';
+import { analyzeTitle, hasLlmProvider, type LlmEnv } from './llm.ts';
 import { withRssCooldown } from './rss-cooldown.ts';
 import { RedditRssError } from './reddit-rss.ts';
 
@@ -90,6 +90,9 @@ export function parseTitleIndex(
         continue;
       if (
         !title ||
+        /^(money|hi|hello|help|question|advice|portfolio)[!?.\s]*$/i.test(
+          title,
+        ) ||
         !Number.isFinite(timestamp) ||
         timestamp > now ||
         timestamp < now - 48 * 3600000
@@ -212,12 +215,7 @@ export async function collectTitleFallback(
       };
       if (hasLlmProvider(env)) {
         try {
-          const analysis = await analyzePost(env, {
-            title: candidate.title,
-            body: '',
-            subreddit: 'ETFs',
-            author: '',
-          });
+          const analysis = await analyzeTitle(env, candidate.title);
           if (analysis) {
             item.titleZh = analysis.titleZh;
             item.summaryZh = analysis.summaryZh;
@@ -251,4 +249,46 @@ export async function collectTitleFallback(
       )
       .run();
   }
+}
+
+export async function enrichSavedTitleFallback(
+  env: LlmEnv & { DB: D1Database },
+) {
+  const row = await env.DB.prepare(
+    "SELECT logical_hour_utc, items_json FROM title_index_runs WHERE status = 'completed' AND checked_at_utc > ?1 ORDER BY logical_hour_utc DESC LIMIT 1",
+  )
+    .bind(new Date(Date.now() - 48 * 3600000).toISOString())
+    .first<{ logical_hour_utc: string; items_json: string }>();
+  if (!row) return { stored: 0, translated: 0 };
+  const items = (JSON.parse(row.items_json) as TitleIndexItem[])
+    .filter(
+      (item) => Date.parse(item.indexedPublishedAt) > Date.now() - 48 * 3600000,
+    )
+    .slice(0, 5);
+  for (const item of items) {
+    if (
+      item.analysisStatus === 'completed' &&
+      /[\u3400-\u9fff]/.test(item.titleZh)
+    )
+      continue;
+    try {
+      const analysis = await analyzeTitle(env, item.title);
+      if (analysis) {
+        Object.assign(item, analysis);
+        item.analysisStatus = 'completed';
+      }
+    } catch {
+      item.analysisStatus = 'failed';
+    }
+  }
+  await env.DB.prepare(
+    "UPDATE title_index_runs SET items_json = ?1 WHERE logical_hour_utc = ?2 AND status = 'completed'",
+  )
+    .bind(JSON.stringify(items), row.logical_hour_utc)
+    .run();
+  return {
+    stored: items.length,
+    translated: items.filter((item) => item.analysisStatus === 'completed')
+      .length,
+  };
 }

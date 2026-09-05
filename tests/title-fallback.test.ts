@@ -7,6 +7,32 @@ import {
 } from '../lib/collector/title-fallback.ts';
 import { logicalHourIso } from '../lib/collector/core.ts';
 import { testDb } from './d1-test-db.ts';
+import { analyzeTitle } from '../lib/collector/llm.ts';
+
+void test('title-only translation does not require invented highlights and rejects English-only output', async () => {
+  const good = {
+    AI: {
+      run: async () => ({
+        response: JSON.stringify({
+          title_zh: '有趣的债券持仓压力测试',
+          summary_zh: '标题提到债券持仓压力测试。',
+        }),
+      }),
+    },
+  };
+  assert.equal(
+    (await analyzeTitle(good, 'Interesting bond holding stress test'))?.titleZh,
+    '有趣的债券持仓压力测试',
+  );
+  const bad = {
+    AI: {
+      run: async () => ({
+        response: JSON.stringify({ title_zh: 'Money', summary_zh: '仅有标题' }),
+      }),
+    },
+  };
+  await assert.rejects(() => analyzeTitle(bad, 'Money'), /Chinese/);
+});
 
 const now = Date.now();
 const item = (

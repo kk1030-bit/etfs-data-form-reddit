@@ -63,7 +63,7 @@ const result = await fetch(site, {
   headers: { ...headers, 'Content-Type': 'application/xml' },
   body,
   redirect: 'manual',
-  signal: AbortSignal.timeout(180000),
+  signal: AbortSignal.timeout(360000),
 });
 if (!result.ok) throw new Error(`Index storage HTTP ${result.status}`);
 const outcome = await result.json();
