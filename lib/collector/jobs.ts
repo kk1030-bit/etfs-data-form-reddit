@@ -33,7 +33,12 @@ import {
   type RedditEnv,
 } from './reddit.ts';
 import { RedditRssError } from './reddit-rss.ts';
-import { RssDeferredError, withRssCooldown } from './rss-cooldown.ts';
+import {
+  RssDeferredError,
+  withRssCooldown,
+  readRssSourceState,
+} from './rss-cooldown.ts';
+import { collectTitleFallback } from './title-fallback.ts';
 import type { RunStage } from './collection-status.ts';
 import { normalizeIndexedPost } from './arctic-shift.ts';
 
@@ -660,6 +665,14 @@ export async function runHourly(
     env.RAW_CONTENT_RETENTION_HOURS,
   );
   if (!(await acquireJob(env.DB, 'hourly', logicalHour, sourceMode))) {
+    if (sourceMode === 'arctic-shift') {
+      const sourceState = await readRssSourceState(env.DB, 'arctic-shift');
+      if (
+        sourceState?.cooldown_until_utc &&
+        Date.parse(sourceState.cooldown_until_utc) > Date.now()
+      )
+        await collectTitleFallback(env, logicalHour);
+    }
     return { status: 'skipped', kind: 'hourly', logicalTimeUtc: logicalHour };
   }
   const observedAt = new Date().toISOString();
@@ -990,6 +1003,8 @@ export async function runHourly(
           `hourly:${logicalHour}`,
         ),
       ]);
+      if (sourceMode === 'arctic-shift' && error.reason === 'rate_limited')
+        await collectTitleFallback(env, logicalHour);
       return {
         status,
         kind: 'hourly',
@@ -1015,6 +1030,8 @@ export async function runHourly(
         )
         .run(),
     ]);
+    if (sourceMode === 'arctic-shift')
+      await collectTitleFallback(env, logicalHour);
     throw error;
   }
 }

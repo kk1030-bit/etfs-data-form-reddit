@@ -353,7 +353,7 @@ export function preserveCurrencyUncertainty(
 
 export async function analyzePost(
   env: LlmEnv,
-  post: RedditCandidate,
+  post: Pick<RedditCandidate, 'title' | 'body' | 'subreddit' | 'author'>,
 ): Promise<PostAnalysis | null> {
   const payload = await structuredResponse(
     env,

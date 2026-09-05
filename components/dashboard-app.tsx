@@ -647,7 +647,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                     </Badge>
                   </div>
                   <h1 className="font-heading text-2xl font-semibold tracking-[-0.035em] sm:text-3xl">
-                    {view === 'top' ? '最近成功采集的 ETF 讨论' : activeLabel}
+                    {view === 'top'
+                      ? !data.stories.length && data.titleFallback?.items.length
+                        ? 'Reddit ETF 标题备援'
+                        : '最近成功采集的 ETF 讨论'
+                      : activeLabel}
                   </h1>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
                     {view === 'top'
@@ -709,7 +713,8 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   {refreshError}
                 </p>
               ) : null}
-              {isIndexed ? (
+              {isIndexed &&
+              (view === 'status' || !data.titleFallback?.items.length) ? (
                 <section
                   className="mb-5 rounded-xl border border-border bg-card p-4 text-sm"
                   aria-label="索引来源说明"
@@ -785,6 +790,94 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
               ) : null}
 
               {view === 'top' ? (
+                data.titleFallback?.items.length &&
+                (data.cooldownUntil ||
+                  data.status === 'delayed' ||
+                  !data.stories.length) ? (
+                  <section
+                    className="mb-6 space-y-3"
+                    aria-labelledby="fallback-heading"
+                  >
+                    <div className="rounded-xl border border-sky-500/25 bg-sky-500/5 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h2
+                          id="fallback-heading"
+                          className="text-base font-semibold"
+                        >
+                          Reddit 标题索引 · 免费备援
+                        </h2>
+                        <Badge variant="outline">非实时热门排行</Badge>
+                      </div>
+                      <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                        主来源暂不可用时，从 Google 公开新闻索引筛选 Reddit ETF
+                        标题，按索引标示时间展示最新五条。仅有标题，未取得作者、正文和互动数；以下中文是标题概述，不计入正式热门榜、追踪或历史报告。
+                      </p>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        索引更新于{' '}
+                        {formatBeijing(data.titleFallback.checkedAt, true)}
+                        （北京） · 候选 {data.titleFallback.sourceCount} 条 ·
+                        中文完成{' '}
+                        {
+                          data.titleFallback.items.filter(
+                            (item) => item.analysisStatus === 'completed',
+                          ).length
+                        }{' '}
+                        / {data.titleFallback.items.length}
+                      </p>
+                    </div>
+                    {data.titleFallback.items
+                      .filter((item) =>
+                        `${item.title} ${item.titleZh}`
+                          .toLowerCase()
+                          .includes(query.toLowerCase().trim()),
+                      )
+                      .map((item) => (
+                        <Card
+                          key={item.id}
+                          className="border-0 ring-1 ring-border"
+                        >
+                          <CardContent className="space-y-3 py-5">
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                              <span>Reddit · Google 标题索引</span>
+                              <span>
+                                索引标示时间{' '}
+                                {formatBeijing(item.indexedPublishedAt, true)}
+                              </span>
+                            </div>
+                            <h3 className="text-lg font-semibold leading-7">
+                              {item.titleZh || item.title}
+                            </h3>
+                            {item.titleZh ? (
+                              <p className="text-sm leading-6 text-muted-foreground">
+                                原标题：{item.title}
+                              </p>
+                            ) : null}
+                            <p className="text-base leading-7">
+                              {item.summaryZh ||
+                                '中文暂未生成；此处保留索引原标题，不补写正文。'}
+                            </p>
+                            <a
+                              href={item.link}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex min-h-10 items-center gap-2 text-sm font-medium text-primary hover:underline"
+                            >
+                              打开 Google 来源索引{' '}
+                              <ExternalLink className="size-3.5" />
+                            </a>
+                            <p className="text-xs text-muted-foreground">
+                              索引链接经 Google 跳转；尚未核实直接 Reddit
+                              原帖地址，请以打开后的原帖为准。
+                            </p>
+                          </CardContent>
+                        </Card>
+                      ))}
+                  </section>
+                ) : null
+              ) : null}
+
+              {view === 'top' &&
+              (data.stories.length > 0 || !data.titleFallback?.items.length) ? (
                 <div
                   className={`grid gap-5 ${selected ? 'xl:grid-cols-[minmax(0,1fr)_320px]' : 'xl:grid-cols-[minmax(0,1fr)_300px]'}`}
                 >

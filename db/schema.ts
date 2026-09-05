@@ -219,3 +219,12 @@ export const jobRuns = sqliteTable(
     index('idx_job_runs_status').on(table.status, table.startedAtUtc),
   ],
 );
+
+export const titleIndexRuns = sqliteTable('title_index_runs', {
+  logicalHourUtc: text('logical_hour_utc').primaryKey(),
+  checkedAtUtc: text('checked_at_utc').notNull(),
+  status: text('status').notNull(),
+  sourceCount: integer('source_count').notNull().default(0),
+  itemsJson: text('items_json').notNull().default('[]'),
+  error: text('error'),
+});

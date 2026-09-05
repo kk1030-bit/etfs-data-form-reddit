@@ -15,6 +15,10 @@ import {
 import { redditSourceMode, type RedditSourceMode } from './collector/reddit';
 import { hasLlmProvider, type LlmEnv } from './collector/llm';
 import type { SourceDetails } from './collector/arctic-shift';
+import {
+  readTitleFallback,
+  type TitleFallback,
+} from './collector/title-fallback';
 
 export type DashboardStory = {
   id: string;
@@ -84,6 +88,7 @@ export type DashboardData = {
   pipeline: PipelineStep[];
   sourceDetails?: SourceDetails | null;
   aiConfigured?: boolean;
+  titleFallback?: TitleFallback | null;
   recentRuns?: Array<{ hour: string; status: string; selected: number }>;
 };
 
@@ -351,7 +356,7 @@ export async function getDashboardData(): Promise<DashboardData> {
   const window = rollingWindow(nowMs);
   const mode = configuredMode();
   try {
-    const [latest, attemptRow, rssState] = await Promise.all([
+    const [latest, attemptRow, rssState, titleFallback] = await Promise.all([
       env.DB.prepare(
         `SELECT logical_hour_utc, completed_at_utc, source_mode,
                 candidate_count, selected_count, source_details_json
@@ -372,6 +377,7 @@ export async function getDashboardData(): Promise<DashboardData> {
             mode === 'arctic-shift' ? 'arctic-shift' : 'reddit-rss',
           )
         : Promise.resolve(null),
+      readTitleFallback(env.DB, nowMs),
     ]);
     const latestAttempt = presentAttempt(attemptRow, nowMs);
     const cooldownUntil =
@@ -387,6 +393,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       sourceLastAttemptAt: rssState?.last_attempt_at_utc ?? null,
       statusError: null,
       aiConfigured: hasLlmProvider(env as unknown as LlmEnv),
+      titleFallback,
       sourceDetails: latest?.source_details_json
         ? (JSON.parse(latest.source_details_json) as SourceDetails)
         : null,
