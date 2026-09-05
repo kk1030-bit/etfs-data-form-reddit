@@ -72,7 +72,7 @@ async function requestRows(
       Accept: 'application/json',
       'User-Agent': 'etfs-hot-topics/0.2 (+private ETF research)',
     },
-    redirect: 'error',
+    redirect: 'manual',
     signal: AbortSignal.timeout(20_000),
   });
   if (response.status === 429) {

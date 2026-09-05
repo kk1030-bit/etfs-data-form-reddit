@@ -208,7 +208,7 @@ async function workersAiStructuredResponse(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(request),
-      redirect: 'error',
+      redirect: 'manual',
       signal: AbortSignal.timeout(60_000),
     });
     if (!response.ok)

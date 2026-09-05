@@ -159,7 +159,8 @@ void test('archive adapter keeps canonical Reddit links, rejects removed data, a
 void test('archive discovery counts deduplicated comment samples including still-tracked older posts', async () => {
   const result = await fetchIndexedCandidates(
     { REDDIT_SUBREDDITS: 'ETFs' },
-    async (input) => {
+    async (input, init) => {
+      assert.equal(init?.redirect, 'manual');
       const url = new URL(input instanceof Request ? input.url : input);
       assert.equal(url.origin, 'https://arctic-shift.photon-reddit.com');
       if (url.pathname === '/api/posts/search')
@@ -292,6 +293,7 @@ void test('AI relay accepts Qwen chat responses, preserves extraction-only instr
   let calls = 0;
   globalThis.fetch = async (_input, init) => {
     calls++;
+    assert.equal(init?.redirect, 'manual');
     assert.equal(typeof init?.body, 'string');
     const body = JSON.parse(init!.body as string);
     assert.match(body.messages[0].content, /绝对不要替作者回答/);
