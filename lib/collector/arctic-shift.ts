@@ -182,7 +182,9 @@ export async function fetchIndexedCandidates(
         );
     } catch (error) {
       if (error instanceof RedditRssError && error.status === 429) throw error;
-      details.warnings.push(`r/${subreddit}：帖子索引暂不可用。`);
+      details.warnings.push(
+        `r/${subreddit}：帖子索引暂不可用（${error instanceof Error ? error.message.slice(0, 180) : 'unknown'}）。`,
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 550));
     try {
@@ -225,7 +227,9 @@ export async function fetchIndexedCandidates(
     await new Promise((resolve) => setTimeout(resolve, 550));
   }
   if (!details.communities.length)
-    throw new RedditRssError('Arctic Shift 所有社区查询失败');
+    throw new RedditRssError(
+      `Arctic Shift 所有社区查询失败：${details.warnings.join(' ').slice(0, 1000)}`,
+    );
   details.commentSampleSize = commentIds.size;
   return {
     candidates: [...candidates.values()].map((post) => ({

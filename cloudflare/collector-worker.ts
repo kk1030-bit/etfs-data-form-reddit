@@ -1,3 +1,5 @@
+import { fetchIndexedCandidates } from '../lib/collector/arctic-shift.ts';
+
 type CronEnv = {
   SITE_BASE_URL: string;
   JOB_SECRET: string;
@@ -48,6 +50,29 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/health')
       return json({ ok: true, service: 'etfs-hot-topics-cron' });
+    if (url.pathname === '/source-health' && request.method === 'GET') {
+      if (request.headers.get('authorization') !== `Bearer ${env.JOB_SECRET}`)
+        return json({ error: 'Unauthorized' }, 401);
+      try {
+        const result = await fetchIndexedCandidates({
+          REDDIT_SUBREDDITS: 'ETFs',
+        });
+        return json({
+          candidates: result.candidates.length,
+          details: result.details,
+        });
+      } catch (error) {
+        return json(
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : 'Source health request failed',
+          },
+          502,
+        );
+      }
+    }
     if (url.pathname === '/ai' && request.method === 'POST') {
       if (
         !env.AI_RELAY_SECRET ||
