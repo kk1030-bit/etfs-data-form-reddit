@@ -12,6 +12,9 @@ import {
   LATEST_ATTEMPT_SQL,
   RECENT_COUNTS_SQL,
 } from './collector/dashboard-queries';
+import { redditSourceMode, type RedditSourceMode } from './collector/reddit';
+import { hasLlmProvider, type LlmEnv } from './collector/llm';
+import type { SourceDetails } from './collector/arctic-shift';
 
 export type DashboardStory = {
   id: string;
@@ -33,9 +36,14 @@ export type DashboardStory = {
   permalink: string;
   analysisStatus: string;
   trend: number[];
+  sourceProvider?: string;
+  indexedAt?: string | null;
+  discussionCount?: number;
+  translation?: string;
 };
 
 export type DashboardReport = {
+  analysisStatus?: string;
   label: string;
   headline: string;
   summary: string;
@@ -53,7 +61,7 @@ export type DashboardAuthor = {
 };
 
 export type DashboardData = {
-  mode: 'rss-preview' | 'oauth' | 'demo';
+  mode: RedditSourceMode | 'demo';
   status: 'healthy' | 'partial' | 'delayed';
   updatedAt: string | null;
   logicalHour: string | null;
@@ -74,6 +82,9 @@ export type DashboardData = {
   weeklyReports: DashboardReport[];
   authors: DashboardAuthor[];
   pipeline: PipelineStep[];
+  sourceDetails?: SourceDetails | null;
+  aiConfigured?: boolean;
+  recentRuns?: Array<{ hour: string; status: string; selected: number }>;
 };
 
 function safeJsonArray(value: unknown): string[] {
@@ -297,15 +308,13 @@ export function dashboardPreviewFixture(): DashboardData {
   };
 }
 
-function configuredMode(): 'rss-preview' | 'oauth' {
+function configuredMode(): RedditSourceMode {
   const runtime = env as unknown as { REDDIT_SOURCE_MODE?: string };
-  return runtime.REDDIT_SOURCE_MODE?.trim().toLowerCase() === 'oauth'
-    ? 'oauth'
-    : 'rss-preview';
+  return redditSourceMode(runtime);
 }
 
 function emptyData(
-  mode: 'rss-preview' | 'oauth',
+  mode: RedditSourceMode,
   attempt: CollectionAttempt | null = null,
   nowMs: number = Date.now(),
 ): DashboardData {
@@ -345,7 +354,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     const [latest, attemptRow, rssState] = await Promise.all([
       env.DB.prepare(
         `SELECT logical_hour_utc, completed_at_utc, source_mode,
-                candidate_count, selected_count
+                candidate_count, selected_count, source_details_json
            FROM hourly_runs WHERE status = 'completed'
            ORDER BY logical_hour_utc DESC LIMIT 1`,
       ).first<{
@@ -354,10 +363,14 @@ export async function getDashboardData(): Promise<DashboardData> {
         source_mode: string;
         candidate_count: number;
         selected_count: number;
+        source_details_json: string;
       }>(),
       env.DB.prepare(LATEST_ATTEMPT_SQL).first<AttemptRow>(),
-      mode === 'rss-preview'
-        ? readRssSourceState(env.DB)
+      mode !== 'oauth'
+        ? readRssSourceState(
+            env.DB,
+            mode === 'arctic-shift' ? 'arctic-shift' : 'reddit-rss',
+          )
         : Promise.resolve(null),
     ]);
     const latestAttempt = presentAttempt(attemptRow, nowMs);
@@ -373,6 +386,10 @@ export async function getDashboardData(): Promise<DashboardData> {
       nextRetryAt: nextHourlyCheck(cooldownUntil),
       sourceLastAttemptAt: rssState?.last_attempt_at_utc ?? null,
       statusError: null,
+      aiConfigured: hasLlmProvider(env as unknown as LlmEnv),
+      sourceDetails: latest?.source_details_json
+        ? (JSON.parse(latest.source_details_json) as SourceDetails)
+        : null,
     };
     if (!latest)
       return {
@@ -380,21 +397,20 @@ export async function getDashboardData(): Promise<DashboardData> {
         ...health,
         ...(cooldownUntil ? { status: 'delayed' as const } : {}),
       };
-    const sourceMode =
-      latest.source_mode === 'rss-preview' ? 'rss-preview' : 'oauth';
+    const sourceMode = mode;
     const cutoff24h = window.start;
 
     const storyResult = await env.DB.prepare(
       `SELECT hr.rank, hr.previous_rank, hr.heat_score,
                 p.id, p.title_original, p.title_zh, p.summary_zh,
                 p.highlights_json, p.topics_json, p.subreddit, p.author,
-                p.created_at_utc, p.permalink, p.analysis_status,
-                po.score, po.comments, po.velocity_score, po.metrics_available
+                p.created_at_utc, p.permalink, p.analysis_status, p.source_provider, p.indexed_at_utc, p.translation_zh,
+                po.score, po.comments, po.velocity_score, po.metrics_available, po.discussion_count
          FROM hourly_rankings hr
          JOIN reddit_posts p ON p.id = hr.post_id
          JOIN post_observations po
            ON po.post_id = hr.post_id AND po.observed_hour_utc = hr.logical_hour_utc
-         WHERE hr.logical_hour_utc = ?1
+         WHERE hr.logical_hour_utc = ?1 AND p.analysis_status NOT IN ('expired', 'deleted')
          ORDER BY hr.rank ASC`,
     )
       .bind(latest.logical_hour_utc)
@@ -412,6 +428,7 @@ export async function getDashboardData(): Promise<DashboardData> {
          latest_hours AS (
            SELECT po.post_id, MAX(po.observed_hour_utc) AS latest_hour
            FROM post_observations po
+           JOIN hourly_runs run ON run.logical_hour_utc = po.observed_hour_utc AND run.status = 'completed'
            JOIN recent_tracking rt ON rt.post_id = po.post_id
            WHERE po.observed_hour_utc > ?1 AND po.observed_hour_utc <= ?2
            GROUP BY po.post_id
@@ -419,14 +436,15 @@ export async function getDashboardData(): Promise<DashboardData> {
          ranking_stats AS (
            SELECT hr.post_id, MIN(hr.rank) AS peak_rank, MAX(hr.heat_score) AS peak_heat
            FROM hourly_rankings hr
+           JOIN hourly_runs run ON run.logical_hour_utc = hr.logical_hour_utc AND run.status = 'completed'
            JOIN recent_tracking rt ON rt.post_id = hr.post_id
            WHERE hr.logical_hour_utc > ?1 AND hr.logical_hour_utc <= ?2
            GROUP BY hr.post_id
          )
          SELECT p.id, p.title_original, p.title_zh, p.summary_zh,
                 p.highlights_json, p.topics_json, p.subreddit, p.author,
-                p.created_at_utc, p.permalink, p.analysis_status,
-                po.score, po.comments, po.velocity_score, po.metrics_available,
+                p.created_at_utc, p.permalink, p.analysis_status, p.source_provider, p.indexed_at_utc, p.translation_zh,
+                po.score, po.comments, po.velocity_score, po.metrics_available, po.discussion_count,
                 COALESCE(rs.peak_rank, 5) AS peak_rank,
                 COALESCE(rs.peak_heat, po.heat_score) AS peak_heat
          FROM recent_tracking rt
@@ -435,6 +453,7 @@ export async function getDashboardData(): Promise<DashboardData> {
            ON po.post_id = lh.post_id AND po.observed_hour_utc = lh.latest_hour
          JOIN reddit_posts p ON p.id = rt.post_id
          LEFT JOIN ranking_stats rs ON rs.post_id = rt.post_id
+         WHERE p.analysis_status NOT IN ('expired', 'deleted')
          ORDER BY peak_heat DESC, rt.last_selected_at_utc DESC, p.id ASC
          LIMIT 120`,
     )
@@ -444,6 +463,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     const trendResult = await env.DB.prepare(
       `SELECT po.post_id, po.heat_score
          FROM post_observations po
+         JOIN hourly_runs run ON run.logical_hour_utc = po.observed_hour_utc AND run.status = 'completed'
          WHERE po.observed_hour_utc > ?1 AND po.observed_hour_utc <= ?2
          ORDER BY po.observed_hour_utc ASC`,
     )
@@ -464,7 +484,12 @@ export async function getDashboardData(): Promise<DashboardData> {
           row.previous_rank === null ? null : Number(row.previous_rank),
         title: String(row.title_zh || row.title_original),
         originalTitle: String(row.title_original),
-        summary: valueString(row.summary_zh, '翻译与重点整理处理中。'),
+        summary: valueString(
+          row.summary_zh,
+          row.analysis_status === 'failed'
+            ? '本轮翻译暂未完成，可先阅读 Reddit 原帖。'
+            : '中文摘要待生成，可先阅读 Reddit 原帖。',
+        ),
         highlights: safeJsonArray(row.highlights_json),
         subreddit: String(row.subreddit),
         author: valueString(row.author, '[deleted]'),
@@ -477,6 +502,10 @@ export async function getDashboardData(): Promise<DashboardData> {
         topics: safeJsonArray(row.topics_json),
         permalink: String(row.permalink),
         analysisStatus: String(row.analysis_status),
+        sourceProvider: String(row.source_provider),
+        indexedAt: valueString(row.indexed_at_utc) || null,
+        discussionCount: Number(row.discussion_count ?? 0),
+        translation: valueString(row.translation_zh),
         trend: trends.get(String(row.id)) ?? [Number(row.heat_score)],
       }),
     );
@@ -488,7 +517,10 @@ export async function getDashboardData(): Promise<DashboardData> {
         previousRank: null,
         title: String(row.title_zh || row.title_original),
         originalTitle: String(row.title_original),
-        summary: valueString(row.summary_zh, '翻译与重点整理处理中。'),
+        summary: valueString(
+          row.summary_zh,
+          '中文摘要待生成，可先阅读 Reddit 原帖。',
+        ),
         highlights: safeJsonArray(row.highlights_json),
         subreddit: String(row.subreddit),
         author: valueString(row.author, '[deleted]'),
@@ -501,24 +533,38 @@ export async function getDashboardData(): Promise<DashboardData> {
         topics: safeJsonArray(row.topics_json),
         permalink: String(row.permalink),
         analysisStatus: String(row.analysis_status),
+        sourceProvider: String(row.source_provider),
+        indexedAt: valueString(row.indexed_at_utc) || null,
+        discussionCount: Number(row.discussion_count ?? 0),
+        translation: valueString(row.translation_zh),
         trend: trends.get(String(row.id)) ?? [Number(row.peak_heat)],
       }),
     );
 
-    const [counts, dailyRows, weeklyRows, authorRows] = await Promise.all([
-      env.DB.prepare(RECENT_COUNTS_SQL)
-        .bind(cutoff24h, window.end)
-        .first<Record<string, number>>(),
-      env.DB.prepare(
-        'SELECT * FROM daily_reports ORDER BY report_date DESC LIMIT 14',
-      ).all<Record<string, unknown>>(),
-      env.DB.prepare(
-        'SELECT * FROM weekly_reports ORDER BY week_start_date DESC LIMIT 8',
-      ).all<Record<string, unknown>>(),
-      env.DB.prepare(
-        'SELECT * FROM author_metrics ORDER BY influence_score DESC LIMIT 12',
-      ).all<Record<string, unknown>>(),
-    ]);
+    const [counts, dailyRows, weeklyRows, authorRows, recentRuns] =
+      await Promise.all([
+        env.DB.prepare(RECENT_COUNTS_SQL)
+          .bind(cutoff24h, window.end)
+          .first<Record<string, number>>(),
+        env.DB.prepare(
+          'SELECT * FROM daily_reports ORDER BY report_date DESC LIMIT 14',
+        ).all<Record<string, unknown>>(),
+        env.DB.prepare(
+          'SELECT * FROM weekly_reports ORDER BY week_start_date DESC LIMIT 8',
+        ).all<Record<string, unknown>>(),
+        env.DB.prepare(
+          'SELECT * FROM author_metrics ORDER BY influence_score DESC LIMIT 12',
+        ).all<Record<string, unknown>>(),
+        env.DB.prepare(
+          'SELECT logical_hour_utc, status, selected_count FROM hourly_runs WHERE logical_hour_utc > ?1 AND logical_hour_utc <= ?2 ORDER BY logical_hour_utc DESC LIMIT 24',
+        )
+          .bind(cutoff24h, window.end)
+          .all<{
+            logical_hour_utc: string;
+            status: string;
+            selected_count: number;
+          }>(),
+      ]);
 
     const reports = (
       values: Record<string, unknown>[],
@@ -530,6 +576,10 @@ export async function getDashboardData(): Promise<DashboardData> {
             ? JSON.parse(row.sections_json)
             : {};
         return {
+          analysisStatus:
+            typeof sections.analysisStatus === 'string'
+              ? sections.analysisStatus
+              : undefined,
           label: String(weekly ? row.week_start_date : row.report_date),
           headline: String(row.headline),
           summary: String(row.executive_summary),
@@ -551,7 +601,10 @@ export async function getDashboardData(): Promise<DashboardData> {
       cooldownUntil ||
       stale
         ? 'delayed'
-        : completedHours >= 23
+        : completedHours >= 23 &&
+            stories.length > 0 &&
+            !health.sourceDetails?.warnings?.length &&
+            stories.every((story) => story.analysisStatus === 'completed')
           ? 'healthy'
           : 'partial';
     const analysisStatus: DashboardData['pipeline'][number]['status'] =
@@ -565,6 +618,8 @@ export async function getDashboardData(): Promise<DashboardData> {
       sourceMode === 'rss-preview',
       analysisStatus,
     );
+    if (sourceMode === 'arctic-shift')
+      pipeline[0].name = '读取 Reddit 公开索引';
 
     return {
       mode: sourceMode,
@@ -589,6 +644,11 @@ export async function getDashboardData(): Promise<DashboardData> {
         communities: Number(row.subreddit_count),
       })),
       pipeline,
+      recentRuns: recentRuns.results.map((run) => ({
+        hour: run.logical_hour_utc,
+        status: run.status,
+        selected: run.selected_count,
+      })),
     };
   } catch {
     return {

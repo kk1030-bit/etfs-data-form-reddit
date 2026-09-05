@@ -1,4 +1,6 @@
 import { env } from 'cloudflare:workers';
+import { redditSourceMode } from '@/lib/collector/reddit';
+import { hasLlmProvider, type LlmEnv } from '@/lib/collector/llm';
 
 export async function GET() {
   try {
@@ -15,15 +17,8 @@ export async function GET() {
     return Response.json({
       ok: result?.ok === 1,
       service: 'etfs-hot-topics-dashboard',
-      sourceMode:
-        runtime.REDDIT_SOURCE_MODE?.trim().toLowerCase() === 'oauth'
-          ? 'oauth'
-          : 'rss-preview',
-      aiConfigured: Boolean(
-        runtime.AI ||
-        (runtime.WORKERS_AI_ACCOUNT_ID && runtime.WORKERS_AI_API_TOKEN) ||
-        runtime.OPENAI_API_KEY,
-      ),
+      sourceMode: redditSourceMode(runtime),
+      aiConfigured: hasLlmProvider(env as unknown as LlmEnv),
     });
   } catch (error) {
     return Response.json(

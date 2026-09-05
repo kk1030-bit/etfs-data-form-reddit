@@ -35,6 +35,7 @@ import {
 import { RedditRssError } from './reddit-rss.ts';
 import { RssDeferredError, withRssCooldown } from './rss-cooldown.ts';
 import type { RunStage } from './collection-status.ts';
+import { normalizeIndexedPost } from './arctic-shift.ts';
 
 export type CollectorEnv = RedditEnv &
   LlmEnv & {
@@ -65,7 +66,7 @@ export type JobResult = {
   selected?: number;
   candidates?: number;
   reportLabel?: string;
-  sourceMode?: 'rss-preview' | 'oauth';
+  sourceMode?: 'rss-preview' | 'oauth' | 'arctic-shift';
   retryAtUtc?: string;
   upstreamStatus?: number;
   reason?: string;
@@ -81,6 +82,7 @@ async function acquireJob(
   db: D1Database,
   kind: JobKind,
   logicalTimeUtc: string,
+  sourceMode = '',
 ): Promise<boolean> {
   const id = `${kind}:${logicalTimeUtc}`;
   const now = new Date().toISOString();
@@ -99,11 +101,11 @@ async function acquireJob(
           OR (job_runs.status IN ('cooldown', 'deferred') AND EXISTS (
             SELECT 1 FROM hourly_runs hr
             WHERE hr.logical_hour_utc = job_runs.logical_time_utc
-              AND hr.retry_at_utc <= excluded.started_at_utc
+              AND (hr.retry_at_utc <= excluded.started_at_utc OR (?6 <> '' AND hr.source_mode <> ?6))
           ))
           OR (job_runs.status = 'running' AND job_runs.started_at_utc < ?5)`,
     )
-    .bind(id, kind, logicalTimeUtc, now, stale)
+    .bind(id, kind, logicalTimeUtc, now, stale, sourceMode)
     .run();
   return Number(result.meta.changes ?? 0) > 0;
 }
@@ -293,6 +295,8 @@ function postUpserts(
       body: candidate.body,
       contentHash: candidate.contentHash ?? '',
       createdAtUtc: candidate.createdAtUtc,
+      sourceProvider: candidate.sourceProvider ?? 'reddit',
+      indexedAtUtc: candidate.indexedAtUtc ?? null,
     })),
   );
   return payloads.map((payload) =>
@@ -301,7 +305,7 @@ function postUpserts(
         `INSERT INTO reddit_posts (
          id, reddit_id, subreddit, author, permalink, outbound_url,
          title_original, body_original, content_hash, analysis_status,
-         source_platform, created_at_utc, first_seen_at_utc, last_seen_at_utc
+         source_platform, created_at_utc, first_seen_at_utc, last_seen_at_utc, source_provider, indexed_at_utc
        )
        SELECT
          json_extract(input.value, '$.id'),
@@ -317,7 +321,9 @@ function postUpserts(
          'reddit',
          json_extract(input.value, '$.createdAtUtc'),
          ?2,
-         ?2
+         ?2,
+         json_extract(input.value, '$.sourceProvider'),
+         json_extract(input.value, '$.indexedAtUtc')
        FROM json_each(?1) AS input
        WHERE true
        ON CONFLICT(id) DO UPDATE SET
@@ -332,8 +338,11 @@ function postUpserts(
            ELSE reddit_posts.analysis_status
          END,
          content_hash = excluded.content_hash,
+         source_provider = excluded.source_provider,
+         indexed_at_utc = excluded.indexed_at_utc,
          last_seen_at_utc = excluded.last_seen_at_utc,
-         deleted_at_utc = NULL`,
+         deleted_at_utc = NULL
+       WHERE reddit_posts.analysis_status <> 'deleted'`,
       )
       .bind(payload, observedAt),
   );
@@ -355,6 +364,7 @@ function observationUpserts(
       bestListingRank: candidate.bestListingRank,
       velocityScore: candidate.velocityScore,
       heatScore: candidate.heatScore,
+      discussionCount: candidate.discussionCount ?? 0,
     })),
   );
   return payloads.map((payload) =>
@@ -362,7 +372,7 @@ function observationUpserts(
       .prepare(
         `INSERT INTO post_observations (
          post_id, observed_hour_utc, observed_at_utc, score, comments,
-         upvote_ratio, metrics_available, best_listing_rank, velocity_score, heat_score
+         upvote_ratio, metrics_available, best_listing_rank, velocity_score, heat_score, discussion_count
        )
        SELECT
          json_extract(input.value, '$.id'),
@@ -374,7 +384,8 @@ function observationUpserts(
          json_extract(input.value, '$.metricsAvailable'),
          json_extract(input.value, '$.bestListingRank'),
          json_extract(input.value, '$.velocityScore'),
-         json_extract(input.value, '$.heatScore')
+         json_extract(input.value, '$.heatScore'),
+         json_extract(input.value, '$.discussionCount')
        FROM json_each(?1) AS input
        WHERE true
        ON CONFLICT(post_id, observed_hour_utc) DO UPDATE SET
@@ -385,7 +396,8 @@ function observationUpserts(
          metrics_available = excluded.metrics_available,
          best_listing_rank = excluded.best_listing_rank,
          velocity_score = excluded.velocity_score,
-         heat_score = excluded.heat_score`,
+         heat_score = excluded.heat_score,
+         discussion_count = excluded.discussion_count`,
       )
       .bind(payload, logicalHour, observedAt),
   );
@@ -647,7 +659,7 @@ export async function runHourly(
   const retentionHours = clampRawRetentionHours(
     env.RAW_CONTENT_RETENTION_HOURS,
   );
-  if (!(await acquireJob(env.DB, 'hourly', logicalHour))) {
+  if (!(await acquireJob(env.DB, 'hourly', logicalHour, sourceMode))) {
     return { status: 'skipped', kind: 'hourly', logicalTimeUtc: logicalHour };
   }
   const observedAt = new Date().toISOString();
@@ -681,25 +693,37 @@ export async function runHourly(
 
     await setStage('source');
     const session = await createRedditSession(env);
-    const discovered =
-      session.mode === 'rss-preview'
-        ? await withRssCooldown(env.DB, () =>
-            discoverRedditCandidates(env, session),
-          )
-        : await discoverRedditCandidates(env, session);
-    await setStage('ranking');
     const [trackers, previousState] = await Promise.all([
       loadActiveTrackers(env.DB, logicalHour),
       loadPreviousState(env.DB, logicalHour),
     ]);
-    const trackedRaw =
-      session.mode === 'oauth' && trackers.length
-        ? await refreshTrackedPosts(
-            env,
-            trackers.map((tracker) => tracker.postId),
-            session,
+    const collect = async () => {
+      const discovered = await discoverRedditCandidates(env, session);
+      const trackedRaw =
+        session.mode !== 'rss-preview' && trackers.length
+          ? await refreshTrackedPosts(
+              env,
+              trackers.map((tracker) => tracker.postId),
+              session,
+            )
+          : [];
+      return { discovered, trackedRaw };
+    };
+    const { discovered, trackedRaw } =
+      session.mode !== 'oauth'
+        ? await withRssCooldown(
+            env.DB,
+            collect,
+            Date.now,
+            session.mode === 'arctic-shift' ? 'arctic-shift' : 'reddit-rss',
           )
-        : [];
+        : await collect();
+    await env.DB.prepare(
+      'UPDATE hourly_runs SET source_details_json = ?1 WHERE logical_hour_utc = ?2',
+    )
+      .bind(JSON.stringify(session.sourceDetails ?? {}), logicalHour)
+      .run();
+    await setStage('ranking');
     const keywords = parseCsv(env.ETF_KEYWORDS, DEFAULT_ETF_KEYWORDS);
     const merged = new Map(
       discovered.map((candidate) => [candidate.id, candidate]),
@@ -709,20 +733,36 @@ export async function runHourly(
     );
     discovered.forEach((candidate) => invalidTrackedIds.delete(candidate.id));
     trackedRaw.forEach((child) => {
-      const candidate = normalizeRedditPost(child, 'tracked', 50, keywords);
+      const candidate =
+        session.mode === 'arctic-shift'
+          ? normalizeIndexedPost(child.data ?? {}, keywords)
+          : normalizeRedditPost(child, 'tracked', 50, keywords);
       const rawId =
         typeof child.data?.id === 'string' || typeof child.data?.id === 'number'
           ? `t3_${String(child.data.id).toLowerCase()}`
           : null;
       if (candidate) {
+        if (session.mode === 'arctic-shift')
+          candidate.discussionCount =
+            session.commentCounts?.get(candidate.id) ?? 0;
+        if (session.mode === 'arctic-shift' && merged.has(candidate.id)) return;
         if (rawId) invalidTrackedIds.delete(rawId);
         merged.set(
           candidate.id,
           mergeCandidate(merged.get(candidate.id), candidate),
         );
+      } else if (session.mode === 'arctic-shift' && rawId) {
+        invalidTrackedIds.add(rawId);
+        merged.delete(rawId);
       }
     });
 
+    const deletedPosts = await rows<{ id: string }>(
+      env.DB.prepare(
+        "SELECT id FROM reddit_posts WHERE analysis_status = 'deleted'",
+      ),
+    );
+    deletedPosts.forEach((post) => merged.delete(post.id));
     const scored = scoreCandidates(
       [...merged.values()],
       scheduledAtMs,
@@ -997,10 +1037,23 @@ function deidentifiedReport(
 
 function reportSource(
   env: CollectorEnv,
-): 'reddit_rss_preview' | 'reddit_oauth' {
+): 'reddit_rss_preview' | 'reddit_oauth' | 'reddit_arctic_shift' {
+  if (redditSourceMode(env) === 'arctic-shift') return 'reddit_arctic_shift';
   return redditSourceMode(env) === 'rss-preview'
     ? 'reddit_rss_preview'
     : 'reddit_oauth';
+}
+
+async function optionalReportAnalysis(
+  env: CollectorEnv,
+  kind: 'daily' | 'weekly',
+  facts: unknown,
+): Promise<ReportAnalysis | null> {
+  try {
+    return deidentifiedReport(await summarizeReport(env, kind, facts));
+  } catch {
+    return null;
+  } // Archive factual aggregates even when the free AI quota or service is unavailable.
 }
 
 async function topTopicSignalsForWindow(
@@ -1024,10 +1077,12 @@ async function topTopicSignalsForWindow(
                 MIN(hr.rank) AS peak_rank
          FROM hourly_rankings hr
          JOIN reddit_posts p ON p.id = hr.post_id
+         JOIN hourly_runs run ON run.logical_hour_utc = hr.logical_hour_utc AND run.status = 'completed'
          WHERE hr.logical_hour_utc >= ?1 AND hr.logical_hour_utc < ?2
+           AND p.analysis_status NOT IN ('deleted', 'expired')
          GROUP BY p.id
          ORDER BY peak_heat DESC, appearances DESC, p.id ASC
-         LIMIT 20`,
+         LIMIT 120`,
       )
       .bind(startUtc, endUtc),
   );
@@ -1085,9 +1140,9 @@ export async function runDaily(
       topTopics,
       metrics: { topStoryCount: topicSignals.length, peakHeat },
     };
-    const generated = deidentifiedReport(
-      topTopics.length ? await summarizeReport(env, 'daily', facts) : null,
-    );
+    const generated = topTopics.length
+      ? await optionalReportAnalysis(env, 'daily', facts)
+      : null;
     const headline =
       generated?.headline || `${window.label} Reddit ETF 热门话题日报`;
     const executiveSummary =
@@ -1096,6 +1151,7 @@ export async function runDaily(
         ? `今日共整理 ${topicSignals.length} 个入榜 ETF 话题，完整度 ${coverage}/24。`
         : `本日暂无足够数据生成话题摘要，完整度 ${coverage}/24。`);
     const sections = {
+      analysisStatus: generated ? 'ai' : 'aggregate',
       themes: generated?.themes.length
         ? generated.themes
         : topTopics.slice(0, 8).map(({ topic }) => topic),
@@ -1194,8 +1250,9 @@ export async function runWeekly(
           `SELECT COUNT(DISTINCT post_id) AS unique_posts,
                     COUNT(*) AS rank_slots,
                     MAX(heat_score) AS peak_heat
-             FROM hourly_rankings
-             WHERE logical_hour_utc >= ?1 AND logical_hour_utc < ?2`,
+             FROM hourly_rankings ranking
+             JOIN hourly_runs run ON run.logical_hour_utc = ranking.logical_hour_utc AND run.status = 'completed'
+             WHERE ranking.logical_hour_utc >= ?1 AND ranking.logical_hour_utc < ?2`,
         ).bind(window.startUtc, window.endUtc),
       ),
     ]);
@@ -1232,19 +1289,21 @@ export async function runWeekly(
       source: reportSource(env),
       weekStart: window.label,
       daysIncluded: daily.length,
-      daily,
+      daily: daily.map((report) => ({
+        ...report,
+        themes: report.themes.slice(0, 6).map((theme) => theme.slice(0, 20)),
+      })),
       activity,
     };
-    const generated = deidentifiedReport(
-      daily.some((report) => report.themes.length)
-        ? await summarizeReport(env, 'weekly', facts)
-        : null,
-    );
+    const generated = daily.some((report) => report.themes.length)
+      ? await optionalReportAnalysis(env, 'weekly', facts)
+      : null;
     const headline = generated?.headline || `ETF 热门话题周报｜${window.label}`;
     const executiveSummary =
       generated?.executiveSummary ||
       `本周汇总 ${daily.length} 份 Reddit ETF 日报与 ${Number(activity.unique_posts)} 个入榜话题。`;
     const sections = {
+      analysisStatus: generated ? 'ai' : 'aggregate',
       themes: generated?.themes.length ? generated.themes : weeklyThemes,
       dailyCoverage: daily.map((report) => ({
         reportDate: report.reportDate,

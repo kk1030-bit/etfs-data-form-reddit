@@ -29,6 +29,8 @@ export const redditPosts = sqliteTable(
     contentHash: text('content_hash').notNull(),
     analysisStatus: text('analysis_status').notNull().default('pending'),
     sourcePlatform: text('source_platform').notNull().default('reddit'),
+    sourceProvider: text('source_provider').notNull().default('reddit'),
+    indexedAtUtc: text('indexed_at_utc'),
     createdAtUtc: text('created_at_utc').notNull(),
     firstSeenAtUtc: text('first_seen_at_utc').notNull(),
     lastSeenAtUtc: text('last_seen_at_utc').notNull(),
@@ -60,6 +62,7 @@ export const postObservations = sqliteTable(
     bestListingRank: integer('best_listing_rank'),
     velocityScore: real('velocity_score').notNull(),
     heatScore: real('heat_score').notNull(),
+    discussionCount: integer('discussion_count').notNull().default(0),
   },
   (table) => [
     primaryKey({ columns: [table.postId, table.observedHourUtc] }),
@@ -79,6 +82,12 @@ export const hourlyRuns = sqliteTable('hourly_runs', {
   stage: text('stage').notNull().default('unknown'),
   upstreamStatus: integer('upstream_status'),
   retryAtUtc: text('retry_at_utc'),
+  sourceDetailsJson: text('source_details_json').notNull().default('{}'),
+});
+
+export const aiDailyUsage = sqliteTable('ai_daily_usage', {
+  day: text('day').primaryKey(),
+  requests: integer('requests').notNull().default(0),
 });
 
 export const redditSourceState = sqliteTable('reddit_source_state', {

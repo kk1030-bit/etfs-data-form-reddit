@@ -1,125 +1,70 @@
 # etfs热门话题
 
-面向 Cloudflare 的 Reddit ETF 话题采集器。当前默认运行「零成本 RSS Preview」：每小时只读取一次 Reddit 公开合并 RSS，从榜单顺序、发布时间与 ETF 相关性选出 Top 5，持续记录 24 小时；每天北京时间 00:00 生成日报，每周一 00:10 汇总前 7 个完整自然日。
+面向 Cloudflare 的私有 Reddit ETF 讨论观察站。当前生产来源是 **Arctic Shift 公开 Reddit 索引**，不是被限流的 Reddit RSS，不需要 Reddit OAuth 审批。
 
-> RSS Preview 只适合私有测试与等待 Reddit Data API 审批期间使用。RSS 没有点赞、评论数、浏览量、karma 或官方 KOL 身份，所以产品只称「榜单指数」「活跃作者」，不宣称真实流量或认证 KOL。
+## 当前行为
 
-## 当前能力
+- 每小时查询六个社区最近 24 小时帖子：ETFs、investing、Bogleheads、stocks、StockMarket、dividends。
+- 每个社区最多 100 篇帖子与 100 条近期留言元数据。只汇总按帖子分组的讨论样本数，不保存留言正文和留言者身份。
+- ETF 过滤、原帖链接规范化、去重，排除删除、成人及不可索引内容；不跟随站外文章链接。
+- 前五篇按讨论样本 50%、ETF 相关性 25%、新鲜度 20%、本采集器作者活跃度 5% 排序。样本为零时不虚构讨论热度。
+- 每篇入榜帖跟踪最多 24 小时；每小时最多 5 个席位，滚动 24 小时最多 120 个席位。同一帖子可以多次入榜，席位不等于不同文章数。
+- Workers AI 生成简体中文标题、短节录译文、摘要与重点。最多翻译 1,000 个输入字符，**不是全文翻译**；内容未变时复用已有译文。
+- 每日北京时间 00:00 汇总刚结束的自然日；每周一 00:10 汇总前一个完整周一至周日。显示实际覆盖程度，不补造缺失小时。
+- 页面可见时每分钟刷新状态，恢复联网时刷新；页面刷新不会触发来源请求。
+- 每个来源独立持久锁与冷却。429 按 1、2、4、8、16、24 小时退避，并遵守更长的服务器等待时间；追踪刷新也在同一锁内。
+- 原始短节录、链接与作者标识最多保留 48 小时，长期仅留去标识化聚合报告。已确认删除的帖子不会被旧索引复活。
 
-- 单一白名单 RSS 请求，默认合并 `ETFs`、`investing`、`Bogleheads`、`stocks`、`StockMarket`、`dividends`。
-- 固定 Reddit HTTPS 主机与程序内 URL 拼接，不接受任意 RSS URL，也不抓取帖子中的站外文章。
-- Atom 解析、HTML 清洗、ID 去重、ETF 关键词过滤与最多 100 个候选。
-- RSS 排名权重：feed 榜位 55%、ETF 相关性 20%、发布时间 15%、作者在本采集器中的历史活跃度 5%、榜位变化 5%。
-- 每小时最多 5 篇；同一帖子跨小时去重，24 小时最多 120 个榜单席位。
-- Cloudflare Workers AI 或其 REST API 生成简体中文标题、短节录翻译、90 字内摘要、重点与主题标签。
-- D1 保存小时榜、24 小时追踪、作者观察、日报、周报和作业状态。
-- 原始短节录、链接与作者标识保留 24–48 小时；长期历史只保留去标识化聚合报告。
-- HTTP 429 时把冷却状态保存在 D1：连续限流按 1、2、4、8、16、24 小时退避，同时遵守更长的 `Retry-After`；冷却期间每小时只检查状态，不请求 Reddit，成功后重置退避。
-- 全局 RSS 请求锁避免并发重复采集；非 Atom、超大回应或解析失败时本轮标记失败，不密集重试。
-- 运行状态分别显示最近排程检查、最后一次实际 RSS 请求、最后成功数据及下次可尝试的整点。失败步骤后显示「未执行」；24 小时统计按当前时间滚动，不把旧榜单当作新采集。
-- 未来 Reddit 审批通过后，可把 `REDDIT_SOURCE_MODE` 改成 `oauth`，沿用现有 Data API reader 与互动指标排名。
+## 数据真实性与限制
+
+Arctic Shift 是第三方索引，不是 Reddit 官方实时接口。部分新帖收录很快，但没有实时性或长期可用性保证，互动总数可能延迟。网站显示**已索引留言样本数**，不称为完整评论数、浏览量或真实流量；作者观察不代表认证 KOL。失败或覆盖不完整时显示状态与上次成功时间。
+
+RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷切换地址密集重试。公共索引不代表获得再发布许可；网站保持私有。
 
 ## 架构
 
-```text
-Cloudflare Cron Worker（UTC Cron）
-       │ HTTPS + shared secret
-       ▼
-Vinext / Cloudflare Worker Site
-  ├─ 每小时：Reddit 合并 RSS → 清洗 → Top 5 → Workers AI → D1
-  ├─ 每日：北京时间自然日汇总
-  ├─ 每周：前 7 个完整自然日汇总
-  └─ React 私有仪表板
-```
+Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Worker 请求 Arctic Shift、写入 D1，并通过独立密钥访问 Cron Worker 的固定模型 AI 接口。网站和 D1 由 .openai/hosting.json 管理。部署运行不依赖本地电脑、磁盘、浏览器或常驻 Python。
 
-网站与 D1 由 `.openai/hosting.json` 管理。独立 Cron Worker 只调用网站内部作业端点，不直接连接 D1。
+[Crawl4AI](https://github.com/unclecode/crawl4ai) 的 Python/Chromium 没有直接嵌入普通 Worker；项目按本场景将受控来源、清洗、去重与结构化抽取重写为 Workers 兼容 TypeScript。
 
-所有运行时代码使用 Cloudflare Workers 支援的 ESM、`fetch`、Web Crypto 与 D1 prepared statements；没有依赖本地磁盘、Node TCP socket 或常驻进程。
+## 零付款 AI
 
-## Crawl4AI 的角色
+生产使用 @cf/qwen/qwen3-30b-a3b-fp8，Cloudflare Workers Free 方案。D1 原子计数限制 **128 次请求 / UTC 日**；每次最多 6,000 UTF-8 输入字节、1,000 输出 tokens。失败也计数。这个上限不是免费额度余额的精确读数，账户其他 AI 用量也会占用额度。达到免费额度或应用上限即暂停，不自动升级；未配置付费备用密钥。
 
-[Crawl4AI](https://github.com/unclecode/crawl4ai) 依赖 CPython、Playwright/Patchright 与 Chromium，无法直接运行在普通 Cloudflare Worker isolate。本项目没有复制或直接执行 Crawl4AI，而是把本场景需要的受控来源、批量取得、内容清洗、结构化抽取、去重和失败处理重写为 Workers 可运行的 TypeScript。Reddit RSS 已提供结构化 Atom，正常采集不需要浏览器渲染。
+## 本地运行与验证
 
-## 本地运行
+需要 Node.js 22.13+。依次执行 npm install、npm run db:local，复制 .env.example 到 .env.local，再执行 npm run dev。无数据时展示等待状态，不用演示数据替代真实榜单。
 
-需要 Node.js 22.13 以上。
-
-```powershell
-npm install
-npm run db:local
-Copy-Item .env.example .env.local
-npm run dev
-```
-
-打开 `http://localhost:3000`。若本地 D1 尚无成功作业，页面会显示等待首次采集；D1 查询失败时显示延迟／失败状态，不会用虚构数据替代真实榜单。
+验证命令：npm test、npm run typecheck、npm run build。独立 Cron 配置位于 cloudflare/wrangler.collector.jsonc，使用 npm run collector:deploy 发布。
 
 ## 环境变量
 
-| 变量                                        | 用途                                                            |
-| ------------------------------------------- | --------------------------------------------------------------- |
-| `REDDIT_SOURCE_MODE`                        | 默认 `rss_preview`；审批后可改 `oauth`                          |
-| `REDDIT_RSS_SORT`                           | `hot`（默认）或 `top`；`top` 固定使用过去一天                   |
-| `REDDIT_SUBREDDITS`                         | 逗号分隔社区白名单，程序只接受合法 subreddit 名称               |
-| `REDDIT_USER_AGENT`                         | RSS／OAuth 请求识别字串                                         |
-| `ETF_KEYWORDS`                              | ETF 名称、ticker 与主题词典                                     |
-| `WORKERS_AI_ACCOUNT_ID`                     | Sites 使用 Workers AI REST 时的 Cloudflare Account ID           |
-| `WORKERS_AI_API_TOKEN`                      | Workers AI Read/Edit token，必须作为 secret 保存                |
-| `WORKERS_AI_MODEL`                          | 默认 `@cf/meta/llama-3.2-3b-instruct`                           |
-| `AI` binding                                | 一般 Cloudflare Worker 可直接绑定 Workers AI；存在时优先于 REST |
-| `OPENAI_API_KEY`                            | 可选的付费备用模型；不需要即可留空                              |
-| `OPENAI_MODEL`                              | OpenAI 备用模型，默认 `gpt-5.4-mini`                            |
-| `JOB_SECRET`                                | 网站作业端点与 Cron Worker 共用的随机秘密                       |
-| `SITE_BYPASS_TOKEN`                         | 私有 Sites 供 Cron Worker 通过登录门槛使用                      |
-| `RAW_CONTENT_RETENTION_HOURS`               | 允许 24–48，默认且最高 48                                       |
-| `NEXT_PUBLIC_SITE_URL`                      | 部署后的可信 HTTPS 来源                                         |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | 仅未来 `oauth` 模式需要                                         |
+| 变量                                         | 用途                                              |
+| -------------------------------------------- | ------------------------------------------------- |
+| REDDIT_SOURCE_MODE                           | 生产 arctic_shift；兼容 rss_preview、oauth        |
+| REDDIT_SUBREDDITS / ETF_KEYWORDS             | 社区白名单与 ETF 关键词                           |
+| REDDIT_USER_AGENT / REDDIT_RSS_SORT          | 备用 RSS/OAuth 配置                               |
+| WORKERS_AI_RELAY_URL                         | 本项目独立 Worker 的 /ai，代码有精确白名单        |
+| WORKERS_AI_RELAY_TOKEN                       | 网站端 AI 密钥，与 Worker 的 AI_RELAY_SECRET 相同 |
+| AI_RELAY_SECRET                              | 仅配置独立 Worker，不与 JOB_SECRET 混用           |
+| AI binding                                   | 独立 Worker 上的原生 Workers AI                   |
+| WORKERS_AI_MODEL                             | relay 固定 Qwen；直连适配器可用此变量             |
+| WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                           |
+| OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                          |
+| JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                   |
+| SITE_BYPASS_TOKEN                            | 仅 Cron，用于通过私有 Sites 门槛                  |
+| RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                    |
+| NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                             |
+| REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET      | 仅审批通过后的 OAuth 模式                         |
 
-Workers AI REST token 不要提交到 Git，也不要贴进公开聊天。未配置 AI 时，RSS 采集与排名仍会运行，运行状态中的翻译步骤显示「未执行」，不会自动在后台继续翻译。
+秘密只放服务端环境变量或本地忽略文件，不提交到 Git、hosting.json 或聊天。Sites 运行时变量修改后需重新发布应用。
 
-## Cloudflare 排程与发布
+## 排程
 
-`cloudflare/wrangler.collector.jsonc` 已定义：
+| Cron（UTC）   | 北京时间     | 作业         |
+| ------------- | ------------ | ------------ |
+| 0 * * * *     | 每小时整点   | 前五篇与追踪 |
+| 0 16 * * *    | 每日 00:00   | 日报         |
+| 10 16 * * SUN | 每周一 00:10 | 周报         |
 
-| Cron（UTC）     | 北京时间     | 作业                                |
-| --------------- | ------------ | ----------------------------------- |
-| `0 * * * *`     | 每小时整点   | 单次 RSS 审查、Top 5、刷新 24h 追踪 |
-| `0 16 * * *`    | 每日 00:00   | 汇总刚结束的北京自然日              |
-| `10 16 * * SUN` | 每周一 00:10 | 汇总前一个完整周一至周日            |
-
-发布网站后，把同一个 `JOB_SECRET` 配置到 Sites 与 Cron Worker；私有网站再配置 `SITE_BYPASS_TOKEN`。然后发布排程 Worker：
-
-```powershell
-npx wrangler secret put JOB_SECRET --config cloudflare/wrangler.collector.jsonc
-npx wrangler secret put SITE_BYPASS_TOKEN --config cloudflare/wrangler.collector.jsonc
-npm run collector:deploy
-```
-
-## 验证
-
-```powershell
-npm test
-npm run typecheck
-npm run lint
-npm run build
-npx wrangler deploy --dry-run --config cloudflare/wrangler.collector.jsonc
-```
-
-## 使用边界
-
-- RSS 公布不等于允许任意重发布或商业再利用；当前部署应保持私有。
-- 只展示标题、短摘要与 Reddit 原帖链接，不保存／展示帖子全文。
-- RSS 缺席不能证明帖子被删除，因此 Preview 模式不会据此建立删除 tombstone。
-- Reddit 可能改变或停用 RSS，也可能回传 429；程序不会绕过限制或密集重试。
-- 切换正式公开或商业用途前，仍应取得 Reddit 书面许可并重新检查条款。
-
-官方资料：
-
-- [Reddit RSS Wiki](https://www.reddit.com/wiki/rss)
-- [Reddit Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy)
-- [Reddit User Agreement](https://redditinc.com/policies/user-agreement)
-- [Cloudflare Workers AI bindings](https://developers.cloudflare.com/workers-ai/configuration/bindings/)
-- [Cloudflare Workers AI REST API](https://developers.cloudflare.com/workers-ai/get-started/rest-api/)
-- [Cloudflare Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
-- [Cloudflare D1 prepared statements](https://developers.cloudflare.com/d1/worker-api/prepared-statements/)
-
-工程说明不构成法律意见。
+参考：[Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)、[索引字段说明](https://github.com/ArthurHeitmann/arctic_shift/blob/master/file_content_explanations.md)、[Workers AI 免费额度](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。

@@ -3,20 +3,17 @@
   "name": "etfs-hot-topics-collector",
   "main": "collector-worker.ts",
   "compatibility_date": "2026-09-02",
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
+  "ai": { "binding": "AI" },
   "observability": {
     "enabled": true,
-    "logs": { "enabled": true }
+    "logs": { "enabled": true },
   },
   "triggers": {
-    "crons": [
-      "0 * * * *",
-      "0 16 * * *",
-      "10 16 * * SUN"
-    ]
+    "crons": ["0 * * * *", "0 16 * * *", "10 16 * * SUN"],
   },
   "vars": {
-    "SITE_BASE_URL": "https://etfs-hot-topics.wangguancc.chatgpt.site"
-  }
+    "SITE_BASE_URL": "https://etfs-hot-topics.wangguancc.chatgpt.site",
+  },
 }

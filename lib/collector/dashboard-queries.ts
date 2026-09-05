@@ -1,5 +1,5 @@
 export const LATEST_ATTEMPT_SQL = `SELECT logical_hour_utc, started_at_utc, completed_at_utc, status, stage,
-  error, upstream_status, retry_at_utc
+  error, upstream_status, retry_at_utc, source_mode
   FROM hourly_runs ORDER BY started_at_utc DESC, logical_hour_utc DESC LIMIT 1`;
 
 export const RECENT_COUNTS_SQL = `SELECT

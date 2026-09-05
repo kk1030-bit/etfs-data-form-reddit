@@ -9,8 +9,13 @@ import {
   type RedditCandidate,
 } from './core.ts';
 import { fetchRedditRssCandidates, type RedditRssEnv } from './reddit-rss.ts';
+import {
+  fetchIndexedCandidates,
+  refreshIndexedPosts,
+  type SourceDetails,
+} from './arctic-shift.ts';
 
-export type RedditSourceMode = 'rss-preview' | 'oauth';
+export type RedditSourceMode = 'rss-preview' | 'oauth' | 'arctic-shift';
 
 export type RedditEnv = RedditRssEnv & {
   REDDIT_SOURCE_MODE?: string;
@@ -35,9 +40,16 @@ export type RedditSession = {
   mode: RedditSourceMode;
   userAgent: string;
   token?: string;
+  sourceDetails?: SourceDetails;
+  commentCounts?: Map<string, number>;
 };
 
 export function redditSourceMode(env: RedditEnv): RedditSourceMode {
+  if (
+    env.REDDIT_SOURCE_MODE?.trim().toLowerCase().replace('_', '-') ===
+    'arctic-shift'
+  )
+    return 'arctic-shift';
   return env.REDDIT_SOURCE_MODE?.trim().toLowerCase() === 'oauth'
     ? 'oauth'
     : 'rss-preview';
@@ -52,7 +64,7 @@ export async function createRedditSession(
   env: RedditEnv,
 ): Promise<RedditSession> {
   const mode = redditSourceMode(env);
-  if (mode === 'rss-preview') {
+  if (mode !== 'oauth') {
     return {
       mode,
       userAgent: env.REDDIT_USER_AGENT ?? 'etfs-hot-topics-rss-preview/0.1',
@@ -136,6 +148,12 @@ export async function discoverRedditCandidates(
 ): Promise<RedditCandidate[]> {
   const session = providedSession ?? (await createRedditSession(env));
   if (session.mode === 'rss-preview') return fetchRedditRssCandidates(env);
+  if (session.mode === 'arctic-shift') {
+    const result = await fetchIndexedCandidates(env);
+    session.sourceDetails = result.details;
+    session.commentCounts = result.commentCounts;
+    return result.candidates;
+  }
   const subreddits = parseCsv(env.REDDIT_SUBREDDITS, DEFAULT_SUBREDDITS).slice(
     0,
     8,
@@ -186,6 +204,7 @@ export async function refreshTrackedPosts(
   providedSession?: RedditSession,
 ): Promise<RawRedditPost[]> {
   const session = providedSession ?? (await createRedditSession(env));
+  if (session.mode === 'arctic-shift') return refreshIndexedPosts(postIds);
   if (session.mode !== 'oauth') return [];
   const ids = Array.from(
     new Set(postIds.filter((id) => /^t3_[a-z0-9]+$/i.test(id))),

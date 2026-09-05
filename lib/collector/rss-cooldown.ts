@@ -1,8 +1,7 @@
 import { RedditRssError } from './reddit-rss.ts';
 
 const HOUR_MS = 3_600_000;
-const SOURCE = 'reddit-rss';
-const LEASE_MS = 2 * 60_000;
+const LEASE_MS = 6 * 60_000;
 
 export type RssSourceState = {
   source: string;
@@ -20,11 +19,12 @@ export class RssDeferredError extends Error {
   constructor(
     retryAtUtc: string,
     reason: 'rate_limited' | 'in_flight' = 'rate_limited',
+    source = 'reddit-rss',
   ) {
     super(
       reason === 'rate_limited'
-        ? 'Reddit RSS rate limited'
-        : 'Reddit RSS request already in progress',
+        ? `${source === 'arctic-shift' ? 'Arctic Shift' : 'Reddit RSS'} rate limited`
+        : `${source === 'arctic-shift' ? 'Arctic Shift' : 'Reddit RSS'} request already in progress`,
     );
     this.name = 'RssDeferredError';
     this.retryAtUtc = retryAtUtc;
@@ -63,12 +63,14 @@ export function nextHourlyCheck(deadline: string | null): string | null {
 
 export async function readRssSourceState(
   db: D1Database,
+  source = 'reddit-rss',
 ): Promise<RssSourceState | null> {
   const state = await db
     .prepare('SELECT * FROM reddit_source_state WHERE source = ?1')
-    .bind(SOURCE)
+    .bind(source)
     .first<RssSourceState>();
   if (state) return state;
+  if (source !== 'reddit-rss') return null;
 
   // Upgrade safely from existing failures without firing another request. This
   // is read-only until an hourly job persists the initial state below.
@@ -98,7 +100,7 @@ export async function readRssSourceState(
   const failedAt = Date.parse(latest.completed_at_utc ?? latest.started_at_utc);
   const retryAfter = latest.error?.match(/; retry-after=(.+)$/)?.[1];
   return {
-    source: SOURCE,
+    source,
     consecutive_429: count,
     cooldown_until_utc: cooldownDeadline(failedAt, count, retryAfter),
     last_attempt_at_utc: latest.started_at_utc,
@@ -112,8 +114,9 @@ export async function withRssCooldown<T>(
   db: D1Database,
   collect: () => Promise<T>,
   now: () => number = Date.now,
+  source = 'reddit-rss',
 ): Promise<T> {
-  const initial = await readRssSourceState(db);
+  const initial = await readRssSourceState(db, source);
   await db
     .prepare(
       `INSERT INTO reddit_source_state
@@ -121,7 +124,7 @@ export async function withRssCooldown<T>(
      VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(source) DO NOTHING`,
     )
     .bind(
-      SOURCE,
+      source,
       initial?.consecutive_429 ?? 0,
       initial?.cooldown_until_utc ?? null,
       initial?.last_attempt_at_utc ?? null,
@@ -141,10 +144,10 @@ export async function withRssCooldown<T>(
       token,
       new Date(nowMs + LEASE_MS).toISOString(),
       new Date(nowMs).toISOString(),
-      SOURCE,
+      source,
     )
     .run();
-  const state = await readRssSourceState(db);
+  const state = await readRssSourceState(db, source);
   if (!Number(claimed.meta.changes)) {
     const cooling =
       state?.cooldown_until_utc && Date.parse(state.cooldown_until_utc) > nowMs;
@@ -152,6 +155,7 @@ export async function withRssCooldown<T>(
       (cooling ? state.cooldown_until_utc : state?.lease_until_utc) ??
         new Date(nowMs + LEASE_MS).toISOString(),
       cooling ? 'rate_limited' : 'in_flight',
+      source,
     );
   }
   try {
@@ -162,7 +166,7 @@ export async function withRssCooldown<T>(
          last_error = NULL, lease_token = NULL, lease_until_utc = NULL
        WHERE source = ?1 AND lease_token = ?2`,
       )
-      .bind(SOURCE, token)
+      .bind(source, token)
       .run();
     return result;
   } catch (error) {
@@ -175,9 +179,9 @@ export async function withRssCooldown<T>(
            last_error = ?3, lease_token = NULL, lease_until_utc = NULL
          WHERE source = ?4 AND lease_token = ?5`,
         )
-        .bind(count, deadline, error.message.slice(0, 2_000), SOURCE, token)
+        .bind(count, deadline, error.message.slice(0, 2_000), source, token)
         .run();
-      throw new RssDeferredError(deadline);
+      throw new RssDeferredError(deadline, 'rate_limited', source);
     }
     await db
       .prepare(
@@ -188,7 +192,7 @@ export async function withRssCooldown<T>(
         error instanceof Error
           ? error.message.slice(0, 2_000)
           : 'RSS request failed',
-        SOURCE,
+        source,
         token,
       )
       .run();

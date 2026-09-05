@@ -114,6 +114,9 @@ export type RedditCandidate = {
   bestListingRank: number | null;
   listingKinds: string[];
   relevance: number;
+  sourceProvider?: 'arctic-shift';
+  indexedAtUtc?: string;
+  discussionCount?: number;
 };
 
 export type PreviousObservation = {
@@ -367,6 +370,7 @@ export function scoreCandidates(
   previousRanks: Map<string, number> = new Map(),
 ): ScoredCandidate[] {
   const rawVelocity = candidates.map((candidate) => {
+    if (candidate.sourceProvider === 'arctic-shift') return 0;
     const prior = previous.get(candidate.id);
     if (!candidate.metricsAvailable) {
       if (!prior?.bestListingRank || !candidate.bestListingRank) return 0;
@@ -396,6 +400,9 @@ export function scoreCandidates(
   );
   const velocityRanks = percentileRanks(rawVelocity);
   const engagementRanks = percentileRanks(rawEngagement);
+  const discussionRanks = percentileRanks(
+    candidates.map((candidate) => candidate.discussionCount ?? 0),
+  );
 
   return candidates
     .map((candidate, index) => {
@@ -419,20 +426,27 @@ export function scoreCandidates(
         relevance: clamp01(candidate.relevance),
         freshness: Math.exp(-ageHours / 24),
       };
-      const heatScore = rssPreview
-        ? 100 *
-          (0.55 * components.listing +
-            0.2 * components.relevance +
-            0.15 * components.freshness +
-            0.05 * components.authorInfluence +
-            0.05 * components.velocity)
-        : 100 *
-          (0.3 * components.velocity +
-            0.22 * components.engagement +
-            0.15 * components.listing +
-            0.13 * components.authorInfluence +
-            0.12 * components.relevance +
-            0.08 * components.freshness);
+      const heatScore =
+        candidate.sourceProvider === 'arctic-shift'
+          ? 100 *
+            (0.5 * (candidate.discussionCount ? discussionRanks[index] : 0) +
+              0.25 * components.relevance +
+              0.2 * components.freshness +
+              0.05 * components.authorInfluence)
+          : rssPreview
+            ? 100 *
+              (0.55 * components.listing +
+                0.2 * components.relevance +
+                0.15 * components.freshness +
+                0.05 * components.authorInfluence +
+                0.05 * components.velocity)
+            : 100 *
+              (0.3 * components.velocity +
+                0.22 * components.engagement +
+                0.15 * components.listing +
+                0.13 * components.authorInfluence +
+                0.12 * components.relevance +
+                0.08 * components.freshness);
       return {
         ...candidate,
         heatScore: Math.round(heatScore * 10) / 10,

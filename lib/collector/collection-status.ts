@@ -17,6 +17,7 @@ export type AttemptRow = {
   error: string | null;
   upstream_status: number | null;
   retry_at_utc: string | null;
+  source_mode?: string;
 };
 
 export type CollectionAttempt = {
@@ -54,16 +55,19 @@ export function presentAttempt(
 ): CollectionAttempt | null {
   if (!row) return null;
   const rateLimited =
-    row.upstream_status === 429 ||
-    row.error?.startsWith('Reddit RSS rate limited');
+    row.upstream_status === 429 || row.error?.includes('rate limited');
+  const sourceName =
+    row.source_mode === 'arctic-shift' || row.error?.startsWith('Arctic Shift')
+      ? 'Arctic Shift 索引服务'
+      : 'Reddit RSS';
   const timedOut =
     row.status === 'running' &&
     nowMs - Date.parse(row.started_at_utc) >= 20 * 60_000;
   let error: string | null = null;
   if (rateLimited)
-    error = 'Reddit 暂时限制 RSS 请求（HTTP 429），本轮没有取得新数据。';
+    error = `${sourceName} 暂时限制请求（HTTP 429），本轮没有取得新数据。`;
   else if (row.status === 'deferred')
-    error = '另一轮 RSS 请求仍在处理中，本轮未重复请求。';
+    error = '另一轮来源请求仍在处理中，本轮未重复请求。';
   else if (timedOut) error = '本轮超过 20 分钟未完成，请查看采集服务日志。';
   else if (row.error) {
     if (row.upstream_status)

@@ -1,2 +1,3 @@
 JOB_SECRET=replace-with-the-same-long-random-value-used-by-the-site
 SITE_BYPASS_TOKEN=required-when-the-site-remains-private
+AI_RELAY_SECRET=independent-long-random-ai-secret-matching-site-relay-token
