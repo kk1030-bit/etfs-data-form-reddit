@@ -36,7 +36,7 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 
 Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runner 标签与 GITHUB_SHA，Worker 使用构建时的 Git SHA。同一版本重跑不会重置；环境或版本变化时连续限流计数归零，并清除本程序计算的 fallback 冷却。有效服务器重置期限仍保留；无法识别来源的旧期限也不会自动清除。GitHub 排程是每小时 :10，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
 
-## 漏跑检查与补触发（本地修正，待配置后发布）
+## 漏跑检查与补触发
 
 - GitHub 原排程仍为每小时 `:10`。Cloudflare 配置增加每小时 `:00`、`:25`、`:50` 的检查，`:25` 前不补发；第二次检查保留超过 20 分钟的执行缓冲。
 - 当前小时已完成、来源冷却、有效采集锁或 GitHub 已有运行/排队任务时，不重复触发；不清除来源冷却、不回填虚假的历史小时。
@@ -47,7 +47,7 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 启用前需在 **Sites 服务端秘密设置**配置 `GITHUB_ACTIONS_TOKEN`：仅授权本仓库 `kk1030-bit/etfs-data-form-reddit`、Actions 读写权限的 fine-grained token。不要复用本机 GitHub 登录 token，不要贴入聊天或提交 Git。此秘密不需要放进前端、GitHub workflow 或独立 Cron Worker。随后发布含新迁移的站点，再发布独立 Cron Worker 的新时刻表；只发布网页不会更新独立 Worker 的 Cron。
 
-本次先完成本地实现与模拟测试，尚未配置此秘密、部署新迁移或启用线上补触发。既有 GitHub 定时任务与手动执行不依赖这个新增秘密。
+发布后应同时核对状态页的排程检查记录与独立 Worker 的时刻表；配置秘密不等于已经发布。既有 GitHub 定时任务与手动执行不依赖这个新增秘密。测试同时覆盖 Node SQLite 和 Cloudflare 本地 D1 执行环境，避免遗漏托管环境的查询限制。
 
 参考：[GitHub workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)、[GitHub 定时任务延迟限制](https://docs.github.com/en/actions/how-tos/troubleshoot-workflows)、[Cloudflare Cron 配置与传播时间](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。
 
@@ -89,7 +89,7 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 | SITE_BYPASS_TOKEN                            | 保留现有 Cron 与 Actions 的 Sites 调用凭据；不替代作业/导入密钥 |
 | TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的既有采集提交密钥                         |
 | ARCTIC_SHIFT_EXTERNAL                        | 生产为 1；Arctic Shift 仅由 GitHub Actions 请求                 |
-| GITHUB_ACTIONS_TOKEN                         | 新增待配置：仅本仓库 Actions 读写的服务端秘密，用于漏跑补触发   |
+| GITHUB_ACTIONS_TOKEN                         | 仅本仓库 Actions 读写的服务端秘密，用于漏跑补触发               |
 | TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                              |
 | RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                                  |
 | NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                                           |

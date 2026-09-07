@@ -90,26 +90,28 @@ function validEvent(scheduledAtMs: number, nowMs: number): boolean {
 // The same predicates protect both the initial read and the atomic reservation.
 // Collection's own job lease considers running attempts stale after 20 minutes.
 const COLLECTION_BARRIERS = `
-  SELECT 'completed' AS status, 1 AS priority FROM job_runs
-    WHERE job_type = 'hourly' AND logical_time_utc = ?1 AND status = 'completed'
-  UNION ALL SELECT 'completed', 1 FROM hourly_runs
-    WHERE logical_hour_utc = ?1 AND status = 'completed'
-  UNION ALL SELECT 'cooldown', 2 FROM reddit_source_state
-    WHERE source = 'arctic-shift' AND cooldown_until_utc > ?2
-  UNION ALL SELECT 'cooldown', 2 FROM hourly_runs
-    WHERE logical_hour_utc = ?1 AND status IN ('cooldown', 'deferred') AND retry_at_utc > ?2
-  UNION ALL SELECT 'running', 3 FROM reddit_source_state
-    WHERE source = 'arctic-shift' AND lease_until_utc > ?2
-  UNION ALL SELECT 'running', 3 FROM job_runs
-    WHERE job_type = 'hourly' AND logical_time_utc = ?1 AND status = 'running' AND started_at_utc > ?3
-  UNION ALL SELECT 'running', 3 FROM hourly_runs
-    WHERE logical_hour_utc = ?1 AND status = 'running' AND started_at_utc > ?3
+  SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM job_runs
+      WHERE job_type = 'hourly' AND logical_time_utc = ?1 AND status = 'completed')
+      OR EXISTS (SELECT 1 FROM hourly_runs
+      WHERE logical_hour_utc = ?1 AND status = 'completed') THEN 'completed'
+    WHEN EXISTS (SELECT 1 FROM reddit_source_state
+      WHERE source = 'arctic-shift' AND cooldown_until_utc > ?2)
+      OR EXISTS (SELECT 1 FROM hourly_runs
+      WHERE logical_hour_utc = ?1 AND status IN ('cooldown', 'deferred') AND retry_at_utc > ?2) THEN 'cooldown'
+    WHEN EXISTS (SELECT 1 FROM reddit_source_state
+      WHERE source = 'arctic-shift' AND lease_until_utc > ?2)
+      OR EXISTS (SELECT 1 FROM job_runs
+      WHERE job_type = 'hourly' AND logical_time_utc = ?1 AND status = 'running' AND started_at_utc > ?3)
+      OR EXISTS (SELECT 1 FROM hourly_runs
+      WHERE logical_hour_utc = ?1 AND status = 'running' AND started_at_utc > ?3) THEN 'running'
+  END AS status
 `;
 
 async function collectionBarrier(db: D1Database, hour: string, nowMs: number) {
   return db
     .prepare(
-      `SELECT status FROM (${COLLECTION_BARRIERS}) ORDER BY priority LIMIT 1`,
+      `SELECT status FROM (${COLLECTION_BARRIERS}) WHERE status IS NOT NULL LIMIT 1`,
     )
     .bind(
       hour,
@@ -340,7 +342,7 @@ export async function ensureHourlyCollection(
           status = 'failed', error = 'github_dispatch_outcome_unknown'
       WHERE logical_hour_utc = ?1 AND lease_token = ?4 AND lease_until_utc > ?2
         AND attempts < 2 AND (last_dispatch_at_utc IS NULL OR last_dispatch_at_utc <= ?3)
-        AND NOT EXISTS (SELECT 1 FROM (${COLLECTION_BARRIERS}))`)
+        AND NOT EXISTS (SELECT 1 FROM (${COLLECTION_BARRIERS}) WHERE status IS NOT NULL)`)
       .bind(
         hour,
         new Date(dispatchMs).toISOString(),
