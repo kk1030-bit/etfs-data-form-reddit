@@ -36,7 +36,13 @@ export async function handleJobRequest(
       );
     // Cooldown is a handled scheduler outcome, not a server crash. The JSON
     // retains upstreamStatus=429 while the Cron receives a successful response.
-    return Response.json(result, { headers });
+    const watchdogFailed =
+      result.scheduler &&
+      ['failed', 'unconfigured', 'exhausted'].includes(result.scheduler.status);
+    return Response.json(result, {
+      headers,
+      status: watchdogFailed ? 503 : 200,
+    });
   } catch (error) {
     return Response.json(
       {

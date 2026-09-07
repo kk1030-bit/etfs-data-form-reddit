@@ -11,7 +11,7 @@
     "logs": { "enabled": true },
   },
   "triggers": {
-    "crons": ["0 * * * *", "0 16 * * *", "10 16 * * SUN"],
+    "crons": ["0,25,50 * * * *", "0 16 * * *", "10 16 * * SUN"],
   },
   "vars": {
     "SITE_BASE_URL": "https://etfs-hot-topics.wangguancc.chatgpt.site",

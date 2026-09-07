@@ -8,6 +8,11 @@ import {
   type PipelineStep,
 } from './collector/collection-status';
 import { nextHourlyCheck, readRssSourceState } from './collector/rss-cooldown';
+import { readSchedulerCheck } from './collector/scheduler-watchdog';
+import {
+  schedulerStatus,
+  type SchedulerStatus,
+} from './collector/scheduler-status';
 import {
   LATEST_ATTEMPT_SQL,
   RECENT_COUNTS_SQL,
@@ -90,6 +95,7 @@ export type DashboardData = {
   aiConfigured?: boolean;
   titleFallback?: TitleFallback | null;
   recentRuns?: Array<{ hour: string; status: string; selected: number }>;
+  scheduler?: SchedulerStatus;
 };
 
 function safeJsonArray(value: unknown): string[] {
@@ -355,6 +361,40 @@ export async function getDashboardData(): Promise<DashboardData> {
   const nowMs = Date.now();
   const window = rollingWindow(nowMs);
   const mode = configuredMode();
+  const external =
+    mode === 'arctic-shift' &&
+    (env as unknown as { ARCTIC_SHIFT_EXTERNAL?: string })
+      .ARCTIC_SHIFT_EXTERNAL === '1';
+  const schedulerRead = external
+    ? Promise.resolve()
+        .then(() => readSchedulerCheck(env.DB))
+        .then(
+          (check) => ({ check, failed: false }),
+          () => ({ check: null, failed: true }),
+        )
+    : null;
+  const withScheduler = async (data: DashboardData): Promise<DashboardData> => {
+    if (!schedulerRead) return data;
+    const result = await schedulerRead;
+    const scheduler = schedulerStatus({
+      nowMs,
+      lastCompletedHour: data.logicalHour,
+      latestAttempt: data.latestAttempt,
+      latestCheck: result.check,
+      checkReadFailed: result.failed,
+      cooldownUntil: data.cooldownUntil,
+    });
+    return {
+      ...data,
+      scheduler,
+      status: scheduler.isOverdue
+        ? 'delayed'
+        : data.status === 'healthy' &&
+            (scheduler.needsAttention || !scheduler.currentHourCompleted)
+          ? 'partial'
+          : data.status,
+    };
+  };
   try {
     const [latest, attemptRow, rssState, titleFallback] = await Promise.all([
       env.DB.prepare(
@@ -406,11 +446,11 @@ export async function getDashboardData(): Promise<DashboardData> {
         : null,
     };
     if (!latest)
-      return {
+      return withScheduler({
         ...emptyData(mode, latestAttempt, nowMs),
         ...health,
         ...(cooldownUntil ? { status: 'delayed' as const } : {}),
-      };
+      });
     const sourceMode = mode;
     const cutoff24h = window.start;
 
@@ -607,6 +647,7 @@ export async function getDashboardData(): Promise<DashboardData> {
 
     const completedHours = Number(counts?.completed_hours ?? 0);
     const stale =
+      !external &&
       nowMs - Date.parse(latest.completed_at_utc) > 2.5 * 60 * 60 * 1_000;
     const status: DashboardData['status'] =
       ['failed', 'cooldown', 'deferred'].includes(
@@ -635,7 +676,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     if (sourceMode === 'arctic-shift')
       pipeline[0].name = '读取 Reddit 公开索引';
 
-    return {
+    return withScheduler({
       mode: sourceMode,
       ...health,
       status,
@@ -663,13 +704,13 @@ export async function getDashboardData(): Promise<DashboardData> {
         status: run.status,
         selected: run.selected_count,
       })),
-    };
+    });
   } catch {
-    return {
+    return withScheduler({
       ...emptyData(mode, null, nowMs),
       status: 'delayed',
       statusError:
         '暂时无法读取运行状态，请稍后刷新。没有将此错误标记成 Reddit 来源故障。',
-    };
+    });
   }
 }

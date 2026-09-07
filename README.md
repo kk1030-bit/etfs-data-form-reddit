@@ -30,11 +30,26 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 
 标题备援由本仓库的 GitHub Actions 标准 Ubuntu runner 每小时第 10 分钟读取一次公开 RSS，再经独立密钥送入 Cloudflare。公开仓库使用标准免费 runner；GitHub 排程可能延迟。网站、D1 和翻译仍在 Cloudflare，不依赖本地电脑。密钥仅保存在 Actions secrets 与 Sites 服务端环境。
 
-同一 GitHub Actions 管线也负责 Arctic Shift 采集与追踪刷新，经既有 TITLE_INGEST_TOKEN 提交到网站 /api/internal/arctic-index。ARCTIC_SHIFT_EXTERNAL=1 时，Cloudflare 小时任务不会直接请求 Arctic Shift；Cloudflare 仍负责验证、排名、D1、翻译及原有日报/周报。网站和 D1 由 .openai/hosting.json 管理，不依赖本地电脑。
+同一 GitHub Actions 管线也负责 Arctic Shift 采集与追踪刷新，经既有 TITLE_INGEST_TOKEN 提交到网站 /api/internal/arctic-index。ARCTIC_SHIFT_EXTERNAL=1 时，Cloudflare 小时任务不会直接请求 Arctic Shift；本版增加排程检查，在必要时补触发同一个 GitHub workflow。Cloudflare 仍负责验证、排名、D1、翻译及原有日报/周报。网站和 D1 由 .openai/hosting.json 管理，不依赖本地电脑。
 
 贴文只请求已公开支持的字段 id,title,created_utc,author,url,num_comments,over_18,subreddit,selftext,retrieved_on；后三个用于现有筛选、译文和索引时间。留言仅请求 id,link_id,created_utc,subreddit，不读取 body。aggregate 不支持按 link_id 分组，因此保留留言样本计数，绝不使用刚归档的 score/num_comments 排名。User-Agent 包含本项目 GitHub 地址。
 
 Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runner 标签与 GITHUB_SHA，Worker 使用构建时的 Git SHA。同一版本重跑不会重置；环境或版本变化时连续限流计数归零，并清除本程序计算的 fallback 冷却。有效服务器重置期限仍保留；无法识别来源的旧期限也不会自动清除。GitHub 排程是每小时 :10，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
+
+## 漏跑检查与补触发（本地修正，待配置后发布）
+
+- GitHub 原排程仍为每小时 `:10`。Cloudflare 配置增加每小时 `:00`、`:25`、`:50` 的检查，`:25` 前不补发；第二次检查保留超过 20 分钟的执行缓冲。
+- 当前小时已完成、来源冷却、有效采集锁或 GitHub 已有运行/排队任务时，不重复触发；不清除来源冷却、不回填虚假的历史小时。
+- 缺少本小时结果时，通过固定 GitHub workflow 的 `workflow_dispatch` 补触发。每小时最多两次、间隔至少 20 分钟，使用 D1 原子锁控制并发。请求结果不明确也计入次数，避免重复请求风暴。
+- `scheduler_checks` 独立记录排程检查时间、结果与补触发次数。派发成功只表示 GitHub 接受请求，不代表 Reddit 数据已抓取、翻译或发布；`hourly_runs` 仍只记录实际采集。
+- 缺少专用 token、GitHub 拒绝请求或补发次数耗尽会明确提示异常；不会再以正常跳过掩盖这些问题。网页读取状态不会触发补发。
+- 状态页将最后排程检查和最近实际采集分开显示；当本小时 `:25` 后仍无本小时完成记录，立即标示未按时完成，不再等待 2.5 小时。`:25` 前也不会隐藏上一小时的缺口。
+
+启用前需在 **Sites 服务端秘密设置**配置 `GITHUB_ACTIONS_TOKEN`：仅授权本仓库 `kk1030-bit/etfs-data-form-reddit`、Actions 读写权限的 fine-grained token。不要复用本机 GitHub 登录 token，不要贴入聊天或提交 Git。此秘密不需要放进前端、GitHub workflow 或独立 Cron Worker。随后发布含新迁移的站点，再发布独立 Cron Worker 的新时刻表；只发布网页不会更新独立 Worker 的 Cron。
+
+本次先完成本地实现与模拟测试，尚未配置此秘密、部署新迁移或启用线上补触发。既有 GitHub 定时任务与手动执行不依赖这个新增秘密。
+
+参考：[GitHub workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)、[GitHub 定时任务延迟限制](https://docs.github.com/en/actions/how-tos/troubleshoot-workflows)、[Cloudflare Cron 配置与传播时间](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。
 
 ## 手动诊断
 
@@ -58,36 +73,37 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 ## 环境变量
 
-| 变量                                         | 用途                                              |
-| -------------------------------------------- | ------------------------------------------------- |
-| REDDIT_SOURCE_MODE                           | 生产 arctic_shift；兼容 rss_preview、oauth        |
-| REDDIT_SUBREDDITS / ETF_KEYWORDS             | 社区白名单与 ETF 关键词                           |
-| REDDIT_USER_AGENT / REDDIT_RSS_SORT          | 备用 RSS/OAuth 配置                               |
-| WORKERS_AI_RELAY_URL                         | 本项目独立 Worker 的 /ai，代码有精确白名单        |
-| WORKERS_AI_RELAY_TOKEN                       | 网站端 AI 密钥，与 Worker 的 AI_RELAY_SECRET 相同 |
-| AI_RELAY_SECRET                              | 仅配置独立 Worker，不与 JOB_SECRET 混用           |
-| AI binding                                   | 独立 Worker 上的原生 Workers AI                   |
-| WORKERS_AI_MODEL                             | relay 固定 Qwen；直连适配器可用此变量             |
-| WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                           |
-| OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                          |
-| JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                   |
+| 变量                                         | 用途                                                            |
+| -------------------------------------------- | --------------------------------------------------------------- |
+| REDDIT_SOURCE_MODE                           | 生产 arctic_shift；兼容 rss_preview、oauth                      |
+| REDDIT_SUBREDDITS / ETF_KEYWORDS             | 社区白名单与 ETF 关键词                                         |
+| REDDIT_USER_AGENT / REDDIT_RSS_SORT          | 备用 RSS/OAuth 配置                                             |
+| WORKERS_AI_RELAY_URL                         | 本项目独立 Worker 的 /ai，代码有精确白名单                      |
+| WORKERS_AI_RELAY_TOKEN                       | 网站端 AI 密钥，与 Worker 的 AI_RELAY_SECRET 相同               |
+| AI_RELAY_SECRET                              | 仅配置独立 Worker，不与 JOB_SECRET 混用                         |
+| AI binding                                   | 独立 Worker 上的原生 Workers AI                                 |
+| WORKERS_AI_MODEL                             | relay 固定 Qwen；直连适配器可用此变量                           |
+| WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                                         |
+| OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                                        |
+| JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                                 |
 | SITE_BYPASS_TOKEN                            | 保留现有 Cron 与 Actions 的 Sites 调用凭据；不替代作业/导入密钥 |
-| TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的既有采集提交密钥           |
-| ARCTIC_SHIFT_EXTERNAL                        | 生产为 1；Arctic Shift 仅由 GitHub Actions 请求   |
-| TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                |
-| RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                    |
-| NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                             |
-| REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET      | 仅审批通过后的 OAuth 模式                         |
+| TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的既有采集提交密钥                         |
+| ARCTIC_SHIFT_EXTERNAL                        | 生产为 1；Arctic Shift 仅由 GitHub Actions 请求                 |
+| GITHUB_ACTIONS_TOKEN                         | 新增待配置：仅本仓库 Actions 读写的服务端秘密，用于漏跑补触发   |
+| TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                              |
+| RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                                  |
+| NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                                           |
+| REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET      | 仅审批通过后的 OAuth 模式                                       |
 
 秘密只放服务端环境变量或本地忽略文件，不提交到 Git、hosting.json 或聊天。Sites 运行时变量修改后需重新发布应用。
 
 ## 排程
 
-| Cron（UTC）   | 北京时间     | 作业                                     |
-| ------------- | ------------ | ---------------------------------------- |
-| 0 * * * *     | 每小时整点   | Cloudflare 检查；外部模式跳过直连        |
-| 0 16 * * *    | 每日 00:00   | 日报                                     |
-| 10 16 * * SUN | 每周一 00:10 | 周报                                     |
-| 10 * * * *    | 每小时 :10   | GitHub 标题备援、Arctic Shift 采集与追踪 |
+| Cron（UTC）     | 北京时间             | 作业                                           |
+| --------------- | -------------------- | ---------------------------------------------- |
+| 0,25,50 * * * * | 每小时 :00、:25、:50 | 本版 Cloudflare 漏跑检查；需另行发布 Cron 配置 |
+| 0 16 * * *      | 每日 00:00           | 日报                                           |
+| 10 16 * * SUN   | 每周一 00:10         | 周报                                           |
+| 10 * * * *      | 每小时 :10           | GitHub 标题备援、Arctic Shift 采集与追踪       |
 
 参考：[Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)、[索引字段说明](https://github.com/ArthurHeitmann/arctic_shift/blob/master/file_content_explanations.md)、[Workers AI 免费额度](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。

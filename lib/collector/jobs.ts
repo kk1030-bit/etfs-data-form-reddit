@@ -44,6 +44,10 @@ import { collectTitleFallback } from './title-fallback.ts';
 import type { RunStage } from './collection-status.ts';
 import { normalizeIndexedPost } from './arctic-shift.ts';
 import type { ArcticSnapshot } from './arctic-snapshot.ts';
+import {
+  ensureHourlyCollection,
+  type SchedulerCheck,
+} from './scheduler-watchdog.ts';
 
 export type CollectorEnv = RedditEnv &
   LlmEnv & {
@@ -51,6 +55,7 @@ export type CollectorEnv = RedditEnv &
     JOB_SECRET?: string;
     RAW_CONTENT_RETENTION_HOURS?: string;
     ARCTIC_SHIFT_EXTERNAL?: string;
+    GITHUB_ACTIONS_TOKEN?: string;
   };
 
 type JobKind = 'hourly' | 'daily' | 'weekly';
@@ -79,6 +84,7 @@ export type JobResult = {
   retryAtUtc?: string;
   upstreamStatus?: number;
   reason?: string;
+  scheduler?: SchedulerCheck;
 };
 
 function errorMessage(error: unknown): string {
@@ -685,12 +691,14 @@ export async function runHourly(
     env.ARCTIC_SHIFT_EXTERNAL === '1' &&
     !externalArctic
   ) {
+    const scheduler = await ensureHourlyCollection(env, scheduledAtMs);
     return {
       status: 'skipped',
       kind: 'hourly',
       logicalTimeUtc: logicalHour,
       sourceMode,
       reason: 'github_actions_collector',
+      scheduler,
     };
   }
   const retentionHours = clampRawRetentionHours(

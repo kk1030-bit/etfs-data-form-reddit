@@ -392,13 +392,22 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
   }, [readLatest]);
 
   const activeLabel = navigation.find((item) => item.id === view)?.label ?? '';
-  const statusLabel = data.cooldownUntil
-    ? 'Reddit 限流，冷却中'
-    : data.status === 'healthy'
-      ? '采集器运行正常'
-      : data.status === 'delayed'
-        ? '采集延迟，沿用上次成功结果'
-        : '部分环节或小时数据待完成';
+  const scheduler = data.scheduler;
+  const statusLabel = scheduler?.isOverdue
+    ? '小时采集漏跑／待完成'
+    : scheduler?.checkUnavailable || scheduler?.checkStale
+      ? '排程检查待确认'
+      : scheduler?.configured === false
+        ? '补触发需配置专用 token'
+        : scheduler && !scheduler.currentHourCompleted
+          ? '本小时采集待完成'
+          : data.cooldownUntil
+            ? 'Reddit 限流，冷却中'
+            : data.status === 'healthy'
+              ? '采集器运行正常'
+              : data.status === 'delayed'
+                ? '采集延迟，沿用上次成功结果'
+                : '部分环节或小时数据待完成';
   const navigate = (next: ViewId) => {
     setView(next);
     setMenuOpen(false);
@@ -414,6 +423,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
     !data.cooldownUntil &&
     !data.latestAttempt?.error &&
     !data.statusError &&
+    !scheduler?.needsAttention &&
     data.status !== 'delayed' &&
     !(isIndexed && data.sourceDetails?.warnings?.length);
   useEffect(() => {
@@ -570,7 +580,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                             ? '只统计作者在本采集器中的入榜活跃度，不能据此认定为 KOL。'
                             : '热门作者是站内互动影响力估算，并非 Reddit 官方认证身份。'
                           : view === 'status'
-                            ? '查看发现、验证、排名、翻译与报告各环节的最近状态。'
+                            ? '查看小时资料是否按时完成、排程检查结果与最近一轮实际采集步骤。'
                             : '所有统计按北京时间自然日归档，原始时间统一以 UTC 保存。'}
                     </p>
                   </div>
@@ -662,6 +672,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
               {data.cooldownUntil ||
               data.latestAttempt?.error ||
               data.statusError ||
+              scheduler?.needsAttention ||
               data.status === 'delayed' ? (
                 <section
                   aria-label="采集状态提示"
@@ -669,27 +680,46 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   className="mb-5 rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-sm"
                 >
                   <p className="font-semibold">
-                    {data.cooldownUntil
-                      ? `${sourceLabel} 限流，已进入冷却`
-                      : data.statusError
-                        ? '运行状态暂不可用'
-                        : data.latestAttempt?.error
-                          ? '最近一轮未取得完整新数据'
-                          : '当前展示较早的成功数据'}
+                    {data.statusError
+                      ? '运行状态暂不可用'
+                      : scheduler?.isOverdue
+                        ? '小时采集漏跑／待完成'
+                        : scheduler?.configured === false
+                          ? '补触发需要配置专用 token'
+                          : scheduler?.checkUnavailable || scheduler?.checkStale
+                            ? 'Cloudflare 排程检查待确认'
+                            : scheduler?.needsAttention
+                              ? '排程检查或补触发待处理'
+                              : data.cooldownUntil
+                                ? `${sourceLabel} 限流，已进入冷却`
+                                : data.latestAttempt?.error
+                                  ? '最近一轮未取得完整新数据'
+                                  : '当前展示较早的成功数据'}
                   </p>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
                     {data.statusError ??
+                      scheduler?.message ??
                       data.latestAttempt?.error ??
                       '没有把旧资料当成本小时的新采集结果。'}
                     {data.cooldownUntil
-                      ? ` 冷却期间暂停来源请求；预计 ${formatBeijing(data.nextRetryAt, true)} 的整点排程恢复尝试（北京时间）。`
+                      ? ` 冷却期间暂停来源请求；预计 ${formatBeijing(data.nextRetryAt, true)} 的${scheduler ? ' GitHub :10 ' : '整点'}排程恢复尝试（北京时间）。`
                       : ''}
                   </p>
+                  {scheduler?.needsAttention ? (
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {scheduler.checkMessage}
+                    </p>
+                  ) : null}
                   <p className="mt-2 text-xs text-muted-foreground">
-                    最后成功：{formatBeijing(data.updatedAt, true)}
-                    ；最新排程检查：
-                    {formatBeijing(data.latestAttempt?.startedAt, true)}。
-                    刷新状态只读取现有记录，不会触发采集。
+                    最后成功采集：{formatBeijing(data.updatedAt, true)}；
+                    {scheduler ? '最新 Cloudflare 检查' : '最近实际采集开始'}：
+                    {formatBeijing(
+                      scheduler
+                        ? scheduler.latestCheck?.checkedAt
+                        : data.latestAttempt?.startedAt,
+                      true,
+                    )}
+                    。 刷新状态只读取现有记录，不会触发采集。
                   </p>
                 </section>
               ) : null}
@@ -966,24 +996,79 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   <Card className="border-0 ring-1 ring-border">
                     <CardHeader>
                       <CardTitle className="text-base font-semibold">
-                        最新排程检查与采集状态
+                        {scheduler
+                          ? '本小时排程与数据状态'
+                          : '最近一轮实际采集'}
                       </CardTitle>
                       <CardDescription>
-                        本次排程时点：
-                        {formatBeijing(data.latestAttempt?.logicalHour, true)}
-                        ；检查于{' '}
-                        {formatBeijing(data.latestAttempt?.startedAt, true)}
+                        {scheduler ? '本小时：' : '采集所属小时：'}
+                        {formatBeijing(
+                          scheduler?.currentHour ??
+                            data.latestAttempt?.logicalHour,
+                          true,
+                        )}
+                        {scheduler ? '；应完成小时：' : '；实际开始于 '}
+                        {formatBeijing(
+                          scheduler?.expectedHour ??
+                            data.latestAttempt?.startedAt,
+                          true,
+                        )}
                         （北京时间）
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-1">
+                      {scheduler ? (
+                        <div className="mb-4 space-y-2 text-sm leading-6">
+                          <p className="font-medium">{scheduler.message}</p>
+                          <Badge variant="outline">
+                            Cloudflare：{scheduler.checkLabel}
+                          </Badge>
+                          <p className="text-muted-foreground">
+                            {scheduler.checkMessage}
+                          </p>
+                        </div>
+                      ) : null}
                       <dl className="mb-4 grid gap-3 rounded-xl bg-muted/50 p-4 text-xs sm:grid-cols-2">
+                        {scheduler ? (
+                          <>
+                            <div>
+                              <dt className="text-muted-foreground">
+                                最新 Cloudflare 排程检查
+                              </dt>
+                              <dd className="mt-1 font-medium">
+                                {formatBeijing(
+                                  scheduler.latestCheck?.checkedAt,
+                                  true,
+                                )}
+                                <span className="mt-1 block text-muted-foreground">
+                                  检查所属小时：
+                                  {formatBeijing(
+                                    scheduler.latestCheck?.logicalHour,
+                                    true,
+                                  )}
+                                </span>
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">
+                                应完成小时的检查期限
+                              </dt>
+                              <dd className="mt-1 font-medium">
+                                {formatBeijing(scheduler.deadlineAt, true)}
+                              </dd>
+                            </div>
+                          </>
+                        ) : null}
                         <div>
                           <dt className="text-muted-foreground">
-                            最后成功取得数据
+                            最后成功采集完成于
                           </dt>
                           <dd className="mt-1 font-medium">
                             {formatBeijing(data.updatedAt, true)}
+                            <span className="mt-1 block text-muted-foreground">
+                              数据所属小时：
+                              {formatBeijing(data.logicalHour, true)}
+                            </span>
                           </dd>
                         </div>
                         <div>
@@ -1014,7 +1099,66 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                             {formatBeijing(data.checkedAt, true)}
                           </dd>
                         </div>
+                        {scheduler ? (
+                          <>
+                            <div>
+                              <dt className="text-muted-foreground">
+                                下一次 GitHub 正常排程
+                              </dt>
+                              <dd className="mt-1 font-medium">
+                                {formatBeijing(scheduler.nextExpectedAt, true)}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">
+                                下一次 Cloudflare 检查
+                              </dt>
+                              <dd className="mt-1 font-medium">
+                                {formatBeijing(scheduler.nextCheckAt, true)}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">
+                                最近检查小时的补触发次数
+                              </dt>
+                              <dd className="mt-1 font-medium">
+                                {scheduler.latestCheck?.attempts ?? '暂无记录'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">
+                                最近补触发时间
+                              </dt>
+                              <dd className="mt-1 font-medium">
+                                {formatBeijing(
+                                  scheduler.latestCheck?.lastDispatchAt,
+                                  true,
+                                )}
+                              </dd>
+                            </div>
+                          </>
+                        ) : null}
                       </dl>
+                      <div className="pb-3 pt-2">
+                        <h3 className="text-sm font-medium">
+                          最近一轮实际采集
+                        </h3>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          所属小时：
+                          {formatBeijing(data.latestAttempt?.logicalHour, true)}
+                          ；开始：
+                          {formatBeijing(data.latestAttempt?.startedAt, true)}
+                          ；完成：
+                          {formatBeijing(data.latestAttempt?.completedAt, true)}
+                          。
+                          下方步骤记录该轮实际采集，完成标记对应该轮所属小时。
+                        </p>
+                        {data.latestAttempt?.error ? (
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {data.latestAttempt.error}
+                          </p>
+                        ) : null}
+                      </div>
                       {data.latestAttempt?.stage === 'preparing' ||
                       data.latestAttempt?.stage === 'unknown' ? (
                         <p className="py-2 text-xs text-muted-foreground">
@@ -1058,7 +1202,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       {data.recentRuns?.length ? (
                         <div className="pt-6">
                           <h3 className="text-sm font-medium">
-                            最近 24 次检查
+                            近 24 小时实际采集记录
                           </h3>
                           <div className="mt-3 grid grid-cols-6 gap-2 sm:grid-cols-8">
                             {[...data.recentRuns].reverse().map((run) => (
@@ -1133,16 +1277,38 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2 text-sm font-semibold">
                           <Clock3 className="size-4 text-primary" />
-                          Cloudflare 排程
+                          采集与报告排程
                         </CardTitle>
                       </CardHeader>
                       <CardContent className="space-y-3 text-xs">
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">
-                            小时审查
-                          </span>
-                          <span>每小时整点</span>
-                        </div>
+                        {scheduler ? (
+                          <>
+                            <div className="flex flex-wrap justify-between gap-2">
+                              <span className="text-muted-foreground">
+                                GitHub 正常采集
+                              </span>
+                              <span>每小时 :10</span>
+                            </div>
+                            <div className="flex flex-wrap justify-between gap-2">
+                              <span className="text-muted-foreground">
+                                Cloudflare 检查
+                              </span>
+                              <span>每小时 :00 / :25 / :50</span>
+                            </div>
+                            <p className="leading-5 text-muted-foreground">
+                              :25 检查本小时资料，缺少完成记录时补触发
+                              GitHub；:50 再检查。
+                              检查或补触发成功后，仍须等待实际采集完成。
+                            </p>
+                          </>
+                        ) : (
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">
+                              小时审查
+                            </span>
+                            <span>每小时整点</span>
+                          </div>
+                        )}
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">
                             历史日报

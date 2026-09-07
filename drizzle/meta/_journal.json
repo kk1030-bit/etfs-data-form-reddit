@@ -50,6 +50,13 @@
       "when": 1788763776507,
       "tag": "0006_tired_betty_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788772788499,
+      "tag": "0007_cheerful_amphibian",
+      "breakpoints": true
     }
   ]
 }

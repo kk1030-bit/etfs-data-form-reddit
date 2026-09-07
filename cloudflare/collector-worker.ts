@@ -1,3 +1,5 @@
+import { inspectSiteJobResponse } from './cron-result';
+
 type CronEnv = {
   SITE_BASE_URL: string;
   JOB_SECRET: string;
@@ -8,6 +10,7 @@ type CronEnv = {
 
 const CRON_JOB: Record<string, 'hourly' | 'daily' | 'weekly'> = {
   '0 * * * *': 'hourly',
+  '0,25,50 * * * *': 'hourly',
   '0 16 * * *': 'daily',
   '10 16 * * SUN': 'weekly',
 };
@@ -114,13 +117,8 @@ export default {
     const kind = CRON_JOB[controller.cron];
     if (!kind) throw new Error(`Unknown cron expression: ${controller.cron}`);
     ctx.waitUntil(
-      invokeSiteJob(env, kind, controller.scheduledTime).then(
-        async (response) => {
-          if (!response.ok)
-            throw new Error(
-              `Site job ${kind} failed: ${response.status} ${(await response.text()).slice(0, 500)}`,
-            );
-        },
+      invokeSiteJob(env, kind, controller.scheduledTime).then((response) =>
+        inspectSiteJobResponse(response, kind),
       ),
     );
   },

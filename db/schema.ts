@@ -230,3 +230,25 @@ export const titleIndexRuns = sqliteTable('title_index_runs', {
   itemsJson: text('items_json').notNull().default('[]'),
   error: text('error'),
 });
+
+// Watchdog checks are separate from collection runs: dispatch is not ingestion.
+export const schedulerChecks = sqliteTable(
+  'scheduler_checks',
+  {
+    logicalHourUtc: text('logical_hour_utc').primaryKey(),
+    checkedAtUtc: text('checked_at_utc').notNull(),
+    status: text('status').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    lastDispatchAtUtc: text('last_dispatch_at_utc'),
+    nextCheckAtUtc: text('next_check_at_utc'),
+    error: text('error'),
+    leaseToken: text('lease_token'),
+    leaseUntilUtc: text('lease_until_utc'),
+  },
+  (table) => [
+    check(
+      'chk_scheduler_attempts',
+      sql`${table.attempts} >= 0 AND ${table.attempts} <= 2`,
+    ),
+  ],
+);
