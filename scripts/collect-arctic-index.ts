@@ -2,6 +2,7 @@ import {
   createArcticFetcher,
   fetchIndexedCandidates,
   refreshIndexedPosts,
+  collectIndexedCommentCounts,
 } from '../lib/collector/arctic-shift.ts';
 import { RedditRssError } from '../lib/collector/reddit-rss.ts';
 import { cleanRedditMarkdown } from '../lib/collector/core.ts';
@@ -68,6 +69,12 @@ try {
     paced,
   );
   const trackedRaw = await refreshIndexedPosts(state.trackedIds, paced);
+  const commentAggregates = await collectIndexedCommentCounts(
+    result.candidates,
+    state.trackedIds,
+    result.details,
+    paced,
+  );
   payload = {
     scheduledAtMs: state.scheduledAtMs,
     executionContext,
@@ -87,6 +94,7 @@ try {
         },
       })),
       commentCounts: [...result.commentCounts],
+      commentAggregates: [...commentAggregates],
       details: result.details,
     },
   };

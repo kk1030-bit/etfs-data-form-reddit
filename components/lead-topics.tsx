@@ -4,6 +4,7 @@ import { ArrowRight, ArrowUpRight, Radio } from 'lucide-react';
 import Image from 'next/image';
 
 import type { DashboardData, DashboardStory } from '@/lib/dashboard-data';
+import { commentMetricLabel, commentGrowthLabel } from '@/lib/comment-metric';
 import './lead-topics.css';
 
 export type LeadTopicsProps = {
@@ -80,7 +81,11 @@ function DiscussionMetric({ story }: { story: DashboardStory }) {
   }
   if (story.sourceProvider === 'arctic-shift') {
     return (
-      <span>已索引讨论样本 {numberLabel(story.discussionCount ?? 0)} 条</span>
+      <span>
+        {commentMetricLabel(story)}
+        <br />
+        {commentGrowthLabel(story)}
+      </span>
     );
   }
   return <span>RSS 不提供互动数字</span>;
@@ -104,16 +109,23 @@ function HeroMetrics({ story }: { story: DashboardStory }) {
             {numberLabel(
               story.metricsAvailable
                 ? story.comments
-                : (story.discussionCount ?? 0),
+                : (story.indexedCommentCount ?? story.discussionCount ?? 0),
             )}
           </span>
           <span className="lead-metric-label">
-            {story.metricsAvailable ? '评论数' : '已索引讨论样本'}
+            {story.metricsAvailable
+              ? '评论数'
+              : story.indexedCommentCount != null
+                ? '已索引留言总数'
+                : '旧版讨论样本'}
           </span>
         </div>
       ) : (
         <p className="lead-metric-unavailable">RSS 不提供互动数字</p>
       )}
+      {indexed ? (
+        <p className="lead-metric-unavailable">{commentGrowthLabel(story)}</p>
+      ) : null}
     </div>
   );
 }

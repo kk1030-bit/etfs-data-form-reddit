@@ -21,6 +21,7 @@ export const redditPosts = sqliteTable(
     outboundUrl: text('outbound_url'),
     titleOriginal: text('title_original').notNull(),
     bodyOriginal: text('body_original').notNull().default(''),
+    linkFlairText: text('link_flair_text'),
     titleZh: text('title_zh'),
     translationZh: text('translation_zh'),
     summaryZh: text('summary_zh'),
@@ -63,6 +64,10 @@ export const postObservations = sqliteTable(
     velocityScore: real('velocity_score').notNull(),
     heatScore: real('heat_score').notNull(),
     discussionCount: integer('discussion_count').notNull().default(0),
+    indexedCommentCount: integer('indexed_comment_count'),
+    commentCountAtUtc: text('comment_count_at_utc'),
+    commentDelta: integer('comment_delta'),
+    commentIntervalHours: real('comment_interval_hours'),
   },
   (table) => [
     primaryKey({ columns: [table.postId, table.observedHourUtc] }),

@@ -48,6 +48,11 @@ export type DashboardStory = {
   sourceProvider?: string;
   indexedAt?: string | null;
   discussionCount?: number;
+  indexedCommentCount?: number | null;
+  commentCountAt?: string | null;
+  commentDelta?: number | null;
+  commentIntervalHours?: number | null;
+  flair?: string | null;
   translation?: string;
 };
 
@@ -459,7 +464,8 @@ export async function getDashboardData(): Promise<DashboardData> {
                 p.id, p.title_original, p.title_zh, p.summary_zh,
                 p.highlights_json, p.topics_json, p.subreddit, p.author,
                 p.created_at_utc, p.permalink, p.analysis_status, p.source_provider, p.indexed_at_utc, p.translation_zh,
-                po.score, po.comments, po.velocity_score, po.metrics_available, po.discussion_count
+                po.score, po.comments, po.velocity_score, po.metrics_available, po.discussion_count,
+                p.link_flair_text, po.indexed_comment_count, po.comment_count_at_utc, po.comment_delta, po.comment_interval_hours
          FROM hourly_rankings hr
          JOIN reddit_posts p ON p.id = hr.post_id
          JOIN post_observations po
@@ -499,6 +505,7 @@ export async function getDashboardData(): Promise<DashboardData> {
                 p.highlights_json, p.topics_json, p.subreddit, p.author,
                 p.created_at_utc, p.permalink, p.analysis_status, p.source_provider, p.indexed_at_utc, p.translation_zh,
                 po.score, po.comments, po.velocity_score, po.metrics_available, po.discussion_count,
+                p.link_flair_text, po.indexed_comment_count, po.comment_count_at_utc, po.comment_delta, po.comment_interval_hours,
                 COALESCE(rs.peak_rank, 5) AS peak_rank,
                 COALESCE(rs.peak_heat, po.heat_score) AS peak_heat
          FROM recent_tracking rt
@@ -559,6 +566,18 @@ export async function getDashboardData(): Promise<DashboardData> {
         sourceProvider: String(row.source_provider),
         indexedAt: valueString(row.indexed_at_utc) || null,
         discussionCount: Number(row.discussion_count ?? 0),
+        indexedCommentCount:
+          row.indexed_comment_count == null
+            ? null
+            : Number(row.indexed_comment_count),
+        commentCountAt: valueString(row.comment_count_at_utc) || null,
+        commentDelta:
+          row.comment_delta == null ? null : Number(row.comment_delta),
+        commentIntervalHours:
+          row.comment_interval_hours == null
+            ? null
+            : Number(row.comment_interval_hours),
+        flair: valueString(row.link_flair_text) || null,
         translation: valueString(row.translation_zh),
         trend: trends.get(String(row.id)) ?? [Number(row.heat_score)],
       }),
@@ -590,6 +609,18 @@ export async function getDashboardData(): Promise<DashboardData> {
         sourceProvider: String(row.source_provider),
         indexedAt: valueString(row.indexed_at_utc) || null,
         discussionCount: Number(row.discussion_count ?? 0),
+        indexedCommentCount:
+          row.indexed_comment_count == null
+            ? null
+            : Number(row.indexed_comment_count),
+        commentCountAt: valueString(row.comment_count_at_utc) || null,
+        commentDelta:
+          row.comment_delta == null ? null : Number(row.comment_delta),
+        commentIntervalHours:
+          row.comment_interval_hours == null
+            ? null
+            : Number(row.comment_interval_hours),
+        flair: valueString(row.link_flair_text) || null,
         translation: valueString(row.translation_zh),
         trend: trends.get(String(row.id)) ?? [Number(row.peak_heat)],
       }),

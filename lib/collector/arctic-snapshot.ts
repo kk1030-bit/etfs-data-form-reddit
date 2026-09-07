@@ -1,10 +1,16 @@
-import { normalizeIndexedPost, type SourceDetails } from './arctic-shift.ts';
+import {
+  normalizeIndexedPost,
+  MAX_COMMENT_AGGREGATES,
+  MAX_INDEXED_COMMENT_COUNT,
+  type SourceDetails,
+} from './arctic-shift.ts';
 import {
   DEFAULT_ETF_KEYWORDS,
   DEFAULT_SUBREDDITS,
   parseCsv,
   type RedditCandidate,
   type RawRedditPost,
+  type IndexedCommentObservation,
 } from './core.ts';
 import type { RedditRssEnv } from './reddit-rss.ts';
 
@@ -12,6 +18,7 @@ export type ArcticSnapshot = {
   candidates: RedditCandidate[];
   trackedRaw: RawRedditPost[];
   commentCounts: Array<[string, number]>;
+  commentAggregates?: Array<[string, IndexedCommentObservation]>;
   details: SourceDetails;
 };
 
@@ -56,6 +63,40 @@ export function parseArcticSnapshot(
     sampleSize += pair[1];
   }
   if (sampleSize > 600) throw new Error('Comment sample exceeds source bound');
+  let aggregates: Map<string, IndexedCommentObservation> | undefined;
+  if (value.commentAggregates !== undefined) {
+    if (
+      !Array.isArray(value.commentAggregates) ||
+      value.commentAggregates.length > MAX_COMMENT_AGGREGATES
+    )
+      throw new Error('Invalid aggregate bounds');
+    aggregates = new Map();
+    for (const pair of value.commentAggregates) {
+      const metric = pair?.[1];
+      const at =
+        typeof metric?.observedAtUtc === 'string'
+          ? Date.parse(metric.observedAtUtc)
+          : NaN;
+      if (
+        !Array.isArray(pair) ||
+        pair.length !== 2 ||
+        typeof pair[0] !== 'string' ||
+        !/^t3_[a-z0-9]+$/.test(pair[0]) ||
+        aggregates.has(pair[0]) ||
+        !Number.isSafeInteger(metric?.count) ||
+        metric.count < 0 ||
+        metric.count > MAX_INDEXED_COMMENT_COUNT ||
+        !Number.isFinite(at) ||
+        at < now - 15 * 60_000 ||
+        at > now + 5000
+      )
+        throw new Error('Invalid comment aggregate observation');
+      aggregates.set(pair[0], {
+        count: metric.count,
+        observedAtUtc: new Date(at).toISOString(),
+      });
+    }
+  }
   const candidates: RedditCandidate[] = [];
   const seen = new Set<string>();
   for (const item of value.candidates) {
@@ -82,6 +123,7 @@ export function parseArcticSnapshot(
         subreddit: item.subreddit,
         title: item.title,
         selftext: item.body,
+        link_flair_text: item.flair,
         author: item.author,
         created_utc: created / 1000,
         permalink: item.permalink,
@@ -96,7 +138,11 @@ export function parseArcticSnapshot(
     if (!post || post.id !== item.id || seen.has(post.id))
       throw new Error('Invalid or duplicate indexed post');
     seen.add(post.id);
-    candidates.push({ ...post, discussionCount: counts.get(post.id) ?? 0 });
+    candidates.push({
+      ...post,
+      discussionCount: counts.get(post.id) ?? 0,
+      indexedComments: aggregates?.get(post.id),
+    });
   }
   const trackedRaw = value.trackedRaw.map((row) => {
     const data = row?.data;
@@ -124,10 +170,19 @@ export function parseArcticSnapshot(
     detail.warnings.length > 20
   )
     throw new Error('Invalid source details');
+  const requested = detail.aggregateRequested ?? aggregates?.size;
+  if (
+    aggregates &&
+    (!Number.isInteger(requested) ||
+      requested! < aggregates.size ||
+      requested! > MAX_COMMENT_AGGREGATES)
+  )
+    throw new Error('Invalid aggregate coverage');
   return {
     candidates,
     trackedRaw,
     commentCounts: [...counts],
+    ...(aggregates ? { commentAggregates: [...aggregates] } : {}),
     details: {
       provider: 'Arctic Shift (GitHub Actions)',
       communities: detail.communities,
@@ -144,6 +199,13 @@ export function parseArcticSnapshot(
           .sort()
           .at(-1) ?? null,
       commentSampleSize: sampleSize,
+      ...(aggregates
+        ? {
+            commentMetric: 'indexed-total' as const,
+            aggregateRequested: requested,
+            aggregateSucceeded: aggregates.size,
+          }
+        : {}),
     },
   };
 }

@@ -7,10 +7,12 @@ import {
   parseCsv,
   type RawRedditPost,
   type RedditCandidate,
+  type IndexedCommentObservation,
 } from './core.ts';
 import { fetchRedditRssCandidates, type RedditRssEnv } from './reddit-rss.ts';
 import {
   fetchIndexedCandidates,
+  createArcticFetcher,
   refreshIndexedPosts,
   type SourceDetails,
 } from './arctic-shift.ts';
@@ -42,6 +44,8 @@ export type RedditSession = {
   token?: string;
   sourceDetails?: SourceDetails;
   commentCounts?: Map<string, number>;
+  commentAggregates?: Map<string, IndexedCommentObservation>;
+  arcticFetcher?: typeof fetch;
 };
 
 export function redditSourceMode(env: RedditEnv): RedditSourceMode {
@@ -68,6 +72,8 @@ export async function createRedditSession(
     return {
       mode,
       userAgent: env.REDDIT_USER_AGENT ?? 'etfs-hot-topics-rss-preview/0.1',
+      arcticFetcher:
+        mode === 'arctic-shift' ? createArcticFetcher() : undefined,
     };
   }
   const clientId = required(env.REDDIT_CLIENT_ID, 'REDDIT_CLIENT_ID');
@@ -149,7 +155,12 @@ export async function discoverRedditCandidates(
   const session = providedSession ?? (await createRedditSession(env));
   if (session.mode === 'rss-preview') return fetchRedditRssCandidates(env);
   if (session.mode === 'arctic-shift') {
-    const result = await fetchIndexedCandidates(env);
+    const result = await fetchIndexedCandidates(
+      env,
+      fetch,
+      Date.now(),
+      session.arcticFetcher,
+    );
     session.sourceDetails = result.details;
     session.commentCounts = result.commentCounts;
     return result.candidates;
@@ -204,7 +215,8 @@ export async function refreshTrackedPosts(
   providedSession?: RedditSession,
 ): Promise<RawRedditPost[]> {
   const session = providedSession ?? (await createRedditSession(env));
-  if (session.mode === 'arctic-shift') return refreshIndexedPosts(postIds);
+  if (session.mode === 'arctic-shift')
+    return refreshIndexedPosts(postIds, session.arcticFetcher);
   if (session.mode !== 'oauth') return [];
   const ids = Array.from(
     new Set(postIds.filter((id) => /^t3_[a-z0-9]+$/i.test(id))),

@@ -57,6 +57,13 @@
       "when": 1788772788499,
       "tag": "0007_cheerful_amphibian",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788782087349,
+      "tag": "0008_bent_mandarin",
+      "breakpoints": true
     }
   ]
 }

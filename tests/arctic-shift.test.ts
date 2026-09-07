@@ -155,7 +155,7 @@ void test('GitHub collector script transports cleaned tracking text and only pro
       const snapshot = parseArcticSnapshot(
         submitted.snapshot,
         { REDDIT_SUBREDDITS: 'ETFs' },
-        now,
+        Date.now(),
       );
       assert.equal(
         snapshot.trackedRaw[0].data?.selftext,
@@ -169,7 +169,11 @@ void test('GitHub collector script transports cleaned tracking text and only pro
     assert.equal(url.origin, 'https://arctic-shift.photon-reddit.com');
     for (const key of ['title', 'query', 'selftext', 'body'])
       assert.equal(url.searchParams.has(key), false);
-    return response(url.pathname === '/api/comments/search' ? [] : [raw]);
+    return response(
+      url.pathname === '/api/comments/search/aggregate'
+        ? [{ key: 'ETFs', count: '24' }]
+        : [raw],
+    );
   };
   await import(
     new URL('../scripts/collect-arctic-index.ts', import.meta.url).href
@@ -644,13 +648,14 @@ void test('archive adapter keeps canonical Reddit links, rejects removed data, a
   assert.equal(scored[0].id, 't3_other');
 });
 
-void test('archive discovery counts deduplicated comment samples including still-tracked older posts', async () => {
+void test('archive discovery projects flair and no longer fetches comment slices', async () => {
   const result = await fetchIndexedCandidates(
     { REDDIT_SUBREDDITS: 'ETFs' },
     async (input, init) => {
       assert.equal(init?.redirect, 'manual');
       const url = new URL(input instanceof Request ? input.url : input);
       assert.equal(url.origin, 'https://arctic-shift.photon-reddit.com');
+      assert.equal(url.pathname, '/api/posts/search');
       for (const key of ['title', 'query', 'selftext', 'body'])
         assert.equal(url.searchParams.has(key), false);
       assert.match(
@@ -684,9 +689,10 @@ void test('archive discovery counts deduplicated comment samples including still
     now,
   );
   assert.equal(result.candidates.length, 1);
-  assert.equal(result.candidates[0].discussionCount, 1);
-  assert.equal(result.commentCounts.get('t3_old123'), 1);
-  assert.equal(result.details.commentSampleSize, 2);
+  assert.equal(result.candidates[0].discussionCount, 0);
+  assert.equal(result.commentCounts.size, 0);
+  assert.equal(result.details.commentSampleSize, 0);
+  assert.ok(ARCTIC_POST_FIELDS.split(',').includes('link_flair_text'));
 });
 
 void test('tracking refresh ignores unsolicited post IDs', async () => {

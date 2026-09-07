@@ -3,6 +3,7 @@ import {
   chunksForD1,
   containsRedditUserHandle,
   DEFAULT_ETF_KEYWORDS,
+  extractEtfTickers,
   logicalHourIso,
   MAX_TRACKED_POSTS,
   mergeCandidate,
@@ -42,7 +43,10 @@ import {
 } from './rss-cooldown.ts';
 import { collectTitleFallback } from './title-fallback.ts';
 import type { RunStage } from './collection-status.ts';
-import { normalizeIndexedPost } from './arctic-shift.ts';
+import {
+  normalizeIndexedPost,
+  collectIndexedCommentCounts,
+} from './arctic-shift.ts';
 import type { ArcticSnapshot } from './arctic-snapshot.ts';
 import {
   ensureHourlyCollection,
@@ -189,44 +193,81 @@ async function loadPreviousState(db: D1Database, logicalHour: string) {
   const previousHour = new Date(
     Date.parse(logicalHour) - 3_600_000,
   ).toISOString();
-  const [observationRows, authorRows, rankRows] = await Promise.all([
-    rows<{
-      post_id: string;
-      score: number;
-      comments: number;
-      observed_at_utc: string;
-      best_listing_rank: number | null;
-    }>(
-      db
-        .prepare(
-          `SELECT post_id, score, comments, observed_at_utc, best_listing_rank
+  const [observationRows, authorRows, rankRows, aggregateRows] =
+    await Promise.all([
+      rows<{
+        post_id: string;
+        score: number;
+        comments: number;
+        observed_at_utc: string;
+        best_listing_rank: number | null;
+      }>(
+        db
+          .prepare(
+            `SELECT post_id, score, comments, observed_at_utc, best_listing_rank
            FROM post_observations WHERE observed_hour_utc = ?1`,
-        )
-        .bind(previousHour),
-    ),
-    rows<{ author: string; influence_score: number }>(
-      db.prepare('SELECT author, influence_score FROM author_metrics'),
-    ),
-    rows<{ post_id: string; rank: number }>(
-      db
-        .prepare(
-          'SELECT post_id, rank FROM hourly_rankings WHERE logical_hour_utc = ?1',
-        )
-        .bind(previousHour),
-    ),
-  ]);
+          )
+          .bind(previousHour),
+      ),
+      rows<{ author: string; influence_score: number }>(
+        db.prepare('SELECT author, influence_score FROM author_metrics'),
+      ),
+      rows<{ post_id: string; rank: number }>(
+        db
+          .prepare(
+            'SELECT post_id, rank FROM hourly_rankings WHERE logical_hour_utc = ?1',
+          )
+          .bind(previousHour),
+      ),
+      rows<{
+        post_id: string;
+        indexed_comment_count: number;
+        comment_count_at_utc: string;
+      }>(
+        db
+          .prepare(`WITH latest AS (
+        SELECT po.post_id, MAX(po.observed_hour_utc) AS hour
+        FROM post_observations po
+        JOIN hourly_runs run ON run.logical_hour_utc = po.observed_hour_utc AND run.status = 'completed'
+        WHERE po.observed_hour_utc < ?1 AND po.observed_hour_utc >= ?2
+          AND po.indexed_comment_count IS NOT NULL AND po.comment_count_at_utc IS NOT NULL
+        GROUP BY po.post_id
+      ) SELECT po.post_id, po.indexed_comment_count, po.comment_count_at_utc
+        FROM latest JOIN post_observations po ON po.post_id = latest.post_id AND po.observed_hour_utc = latest.hour`)
+          .bind(
+            logicalHour,
+            new Date(Date.parse(logicalHour) - 48 * 3_600_000).toISOString(),
+          ),
+      ),
+    ]);
+  const observations = new Map<string, PreviousObservation>(
+    observationRows.map((row) => [
+      row.post_id,
+      {
+        score: row.score,
+        comments: row.comments,
+        observedAtUtc: row.observed_at_utc,
+        bestListingRank: row.best_listing_rank,
+      },
+    ]),
+  );
+  for (const row of aggregateRows) {
+    const prior = observations.get(row.post_id) ?? {
+      score: 0,
+      comments: 0,
+      observedAtUtc: row.comment_count_at_utc,
+      bestListingRank: null,
+    };
+    observations.set(row.post_id, {
+      ...prior,
+      indexedComments: {
+        count: row.indexed_comment_count,
+        observedAtUtc: row.comment_count_at_utc,
+      },
+    });
+  }
   return {
-    observations: new Map<string, PreviousObservation>(
-      observationRows.map((row) => [
-        row.post_id,
-        {
-          score: row.score,
-          comments: row.comments,
-          observedAtUtc: row.observed_at_utc,
-          bestListingRank: row.best_listing_rank,
-        },
-      ]),
-    ),
+    observations,
     authors: new Map(
       authorRows.map((row) => [row.author, row.influence_score]),
     ),
@@ -315,6 +356,7 @@ function postUpserts(
       outboundUrl: candidate.outboundUrl,
       title: candidate.title,
       body: candidate.body,
+      flair: candidate.flair ?? null,
       contentHash: candidate.contentHash ?? '',
       createdAtUtc: candidate.createdAtUtc,
       sourceProvider: candidate.sourceProvider ?? 'reddit',
@@ -327,7 +369,7 @@ function postUpserts(
         `INSERT INTO reddit_posts (
          id, reddit_id, subreddit, author, permalink, outbound_url,
          title_original, body_original, content_hash, analysis_status,
-         source_platform, created_at_utc, first_seen_at_utc, last_seen_at_utc, source_provider, indexed_at_utc
+         source_platform, created_at_utc, first_seen_at_utc, last_seen_at_utc, source_provider, indexed_at_utc, link_flair_text
        )
        SELECT
          json_extract(input.value, '$.id'),
@@ -345,7 +387,8 @@ function postUpserts(
          ?2,
          ?2,
          json_extract(input.value, '$.sourceProvider'),
-         json_extract(input.value, '$.indexedAtUtc')
+         json_extract(input.value, '$.indexedAtUtc'),
+         json_extract(input.value, '$.flair')
        FROM json_each(?1) AS input
        WHERE true
        ON CONFLICT(id) DO UPDATE SET
@@ -355,6 +398,7 @@ function postUpserts(
          outbound_url = excluded.outbound_url,
          title_original = excluded.title_original,
          body_original = excluded.body_original,
+         link_flair_text = excluded.link_flair_text,
          analysis_status = CASE
            WHEN reddit_posts.content_hash <> excluded.content_hash THEN 'pending'
            ELSE reddit_posts.analysis_status
@@ -387,6 +431,10 @@ function observationUpserts(
       velocityScore: candidate.velocityScore,
       heatScore: candidate.heatScore,
       discussionCount: candidate.discussionCount ?? 0,
+      indexedCommentCount: candidate.indexedComments?.count ?? null,
+      commentCountAtUtc: candidate.indexedComments?.observedAtUtc ?? null,
+      commentDelta: candidate.commentGrowth?.delta ?? null,
+      commentIntervalHours: candidate.commentGrowth?.hours ?? null,
     })),
   );
   return payloads.map((payload) =>
@@ -394,7 +442,8 @@ function observationUpserts(
       .prepare(
         `INSERT INTO post_observations (
          post_id, observed_hour_utc, observed_at_utc, score, comments,
-         upvote_ratio, metrics_available, best_listing_rank, velocity_score, heat_score, discussion_count
+         upvote_ratio, metrics_available, best_listing_rank, velocity_score, heat_score, discussion_count,
+         indexed_comment_count, comment_count_at_utc, comment_delta, comment_interval_hours
        )
        SELECT
          json_extract(input.value, '$.id'),
@@ -407,7 +456,11 @@ function observationUpserts(
          json_extract(input.value, '$.bestListingRank'),
          json_extract(input.value, '$.velocityScore'),
          json_extract(input.value, '$.heatScore'),
-         json_extract(input.value, '$.discussionCount')
+         json_extract(input.value, '$.discussionCount'),
+         json_extract(input.value, '$.indexedCommentCount'),
+         json_extract(input.value, '$.commentCountAtUtc'),
+         json_extract(input.value, '$.commentDelta'),
+         json_extract(input.value, '$.commentIntervalHours')
        FROM json_each(?1) AS input
        WHERE true
        ON CONFLICT(post_id, observed_hour_utc) DO UPDATE SET
@@ -419,7 +472,11 @@ function observationUpserts(
          best_listing_rank = excluded.best_listing_rank,
          velocity_score = excluded.velocity_score,
          heat_score = excluded.heat_score,
-         discussion_count = excluded.discussion_count`,
+         discussion_count = excluded.discussion_count,
+         indexed_comment_count = excluded.indexed_comment_count,
+         comment_count_at_utc = excluded.comment_count_at_utc,
+         comment_delta = excluded.comment_delta,
+         comment_interval_hours = excluded.comment_interval_hours`,
       )
       .bind(payload, logicalHour, observedAt),
   );
@@ -589,6 +646,7 @@ async function purgeExpiredUserContent(
            permalink = 'expired:' || id,
            title_original = '[content expired]',
            body_original = '',
+           link_flair_text = NULL,
            title_zh = NULL,
            translation_zh = NULL,
            summary_zh = NULL,
@@ -781,6 +839,9 @@ export async function runHourly(
         if (!snapshot) throw new Error('Arctic snapshot required');
         session.sourceDetails = snapshot.details;
         session.commentCounts = new Map(snapshot.commentCounts);
+        session.commentAggregates = snapshot.commentAggregates
+          ? new Map(snapshot.commentAggregates)
+          : undefined;
         const trackedIds = new Set(trackers.map((t) => t.postId));
         return {
           discovered: snapshot.candidates,
@@ -798,6 +859,19 @@ export async function runHourly(
               session,
             )
           : [];
+      if (
+        session.mode === 'arctic-shift' &&
+        session.sourceDetails &&
+        session.arcticFetcher
+      )
+        session.commentAggregates = await collectIndexedCommentCounts(
+          discovered,
+          trackers.map((tracker) => tracker.postId),
+          session.sourceDetails,
+          session.arcticFetcher,
+          Date.now,
+          3 * 60_000,
+        );
       return { discovered, trackedRaw };
     };
     const { discovered, trackedRaw } =
@@ -849,14 +923,63 @@ export async function runHourly(
       }
     });
 
+    // /posts/ids can temporarily omit a tracked ID. A successful independent
+    // aggregate still supplies a real observation; reuse only retained, non-deleted
+    // post metadata without treating absence as deletion or refreshing its index time.
+    const missingMetadataIds = trackers
+      .map((tracker) => tracker.postId)
+      .filter(
+        (id) =>
+          session.commentAggregates?.has(id) &&
+          !merged.has(id) &&
+          !invalidTrackedIds.has(id),
+      );
+    if (missingMetadataIds.length) {
+      const retained = await rows<Record<string, unknown>>(
+        env.DB.prepare(`SELECT reddit_id, subreddit, author, permalink, outbound_url,
+          title_original, body_original, link_flair_text, created_at_utc, indexed_at_utc
+          FROM reddit_posts WHERE id IN (SELECT value FROM json_each(?1))
+          AND analysis_status NOT IN ('expired', 'deleted') AND deleted_at_utc IS NULL`).bind(
+          JSON.stringify(missingMetadataIds),
+        ),
+      );
+      for (const row of retained) {
+        const post = normalizeIndexedPost(
+          {
+            id: row.reddit_id,
+            subreddit: row.subreddit,
+            author: row.author,
+            permalink: row.permalink,
+            url: row.outbound_url,
+            title: row.title_original,
+            selftext: row.body_original,
+            link_flair_text: row.link_flair_text,
+            created_utc: Date.parse(String(row.created_at_utc)) / 1000,
+            retrieved_on:
+              typeof row.indexed_at_utc === 'string'
+                ? Date.parse(row.indexed_at_utc) / 1000
+                : undefined,
+          },
+          keywords,
+        );
+        if (post) merged.set(post.id, post);
+      }
+    }
     const deletedPosts = await rows<{ id: string }>(
       env.DB.prepare(
         "SELECT id FROM reddit_posts WHERE analysis_status = 'deleted'",
       ),
     );
     deletedPosts.forEach((post) => merged.delete(post.id));
+    for (const candidate of merged.values())
+      if (session.mode === 'arctic-shift')
+        candidate.indexedComments = session.commentAggregates?.get(
+          candidate.id,
+        );
     const scored = scoreCandidates(
-      [...merged.values()],
+      [...merged.values()].filter(
+        (candidate) => !session.commentAggregates || candidate.indexedComments,
+      ),
       scheduledAtMs,
       previousState.observations,
       previousState.authors,
@@ -872,8 +995,27 @@ export async function runHourly(
         .map((candidate) => candidate.id),
     );
     const selected = selectTopStories(
-      scored.filter((candidate) => selectableDiscoveredIds.has(candidate.id)),
+      scored.filter(
+        (candidate) =>
+          selectableDiscoveredIds.has(candidate.id) &&
+          (!session.commentAggregates || candidate.indexedComments),
+      ),
     );
+    if (session.commentAggregates && session.sourceDetails) {
+      const tickerSeats = selected.filter(
+        (post) => extractEtfTickers(post.title, post.body).length,
+      ).length;
+      if (tickerSeats < 3) {
+        session.sourceDetails.warnings.push(
+          `具体 ETF 代号席位 ${tickerSeats}/3：本轮有效候选或作者分散度不足，不补造帖子。`,
+        );
+        await env.DB.prepare(
+          'UPDATE hourly_runs SET source_details_json = ?1 WHERE logical_hour_utc = ?2',
+        )
+          .bind(JSON.stringify(session.sourceDetails), logicalHour)
+          .run();
+      }
+    }
     const persistIds = new Set([
       ...selected.map((candidate) => candidate.id),
       ...trackers.map((tracker) => tracker.postId),
@@ -921,6 +1063,7 @@ export async function runHourly(
                outbound_url = NULL,
                title_original = '[deleted]',
                body_original = '',
+               link_flair_text = NULL,
                title_zh = NULL,
                translation_zh = NULL,
                summary_zh = NULL,

@@ -96,6 +96,173 @@ export type RawRedditPost = {
   data?: Record<string, unknown>;
 };
 
+// Deliberate ETF allowlist: ordinary capitals (IRA, FIRE, ETF) and stocks are not tickers.
+export const ETF_TICKERS = new Set([
+  'VOO',
+  'VTI',
+  'VT',
+  'SPY',
+  'QQQ',
+  'QQQM',
+  'SCHD',
+  'VXUS',
+  'BND',
+  'AVUV',
+  'IWM',
+  'TLT',
+  'SGOV',
+  'IVV',
+  'ITOT',
+  'SPLG',
+  'VUG',
+  'VTV',
+  'VGT',
+  'SCHG',
+  'SCHB',
+  'SCHF',
+  'SCHE',
+  'SCHZ',
+  'SCHA',
+  'SCHX',
+  'DGRO',
+  'DGRW',
+  'VIG',
+  'VYM',
+  'JEPI',
+  'JEPQ',
+  'DIVO',
+  'USFR',
+  'TFLO',
+  'BIL',
+  'AGG',
+  'BNDX',
+  'VGIT',
+  'VGSH',
+  'VGLT',
+  'IEF',
+  'TIP',
+  'VTIP',
+  'LQD',
+  'HYG',
+  'EMB',
+  'VEA',
+  'VWO',
+  'IXUS',
+  'IEFA',
+  'IEMG',
+  'EFA',
+  'EEM',
+  'AVDV',
+  'AVEM',
+  'AVES',
+  'AVDE',
+  'AVUS',
+  'AVGE',
+  'AVGV',
+  'DFAC',
+  'DFAX',
+  'DFAT',
+  'DFSV',
+  'VB',
+  'VO',
+  'VBR',
+  'VOE',
+  'VBK',
+  'VOT',
+  'IJR',
+  'IJH',
+  'IJS',
+  'IUSV',
+  'IUSG',
+  'RSP',
+  'QUAL',
+  'USMV',
+  'MTUM',
+  'SPLV',
+  'SPYG',
+  'SPYV',
+  'XLK',
+  'XLF',
+  'XLE',
+  'XLV',
+  'XLI',
+  'XLP',
+  'XLY',
+  'XLU',
+  'XLB',
+  'XLRE',
+  'XLC',
+  'SMH',
+  'SOXX',
+  'SOXQ',
+  'IGV',
+  'FTEC',
+  'FDVV',
+  'FELG',
+  'FELC',
+  'VHT',
+  'VNQ',
+  'VNQI',
+  'REET',
+  'GLD',
+  'IAU',
+  'GLDM',
+  'SLV',
+  'PDBC',
+  'IBIT',
+  'FBTC',
+  'BITB',
+  'ARKB',
+  'ETHA',
+  'FETH',
+  'ARKK',
+  'ARKW',
+  'TQQQ',
+  'SQQQ',
+  'UPRO',
+  'SPXU',
+  'SOXL',
+  'SOXS',
+  'NTSX',
+  'NTSI',
+  'NTSE',
+]);
+
+export function extractEtfTickers(title: string, body = ''): string[] {
+  const tokens =
+    `${title}\n${body}`.toUpperCase().match(/\b[A-Z][A-Z0-9]{1,4}\b/g) ?? [];
+  return [...new Set(tokens.filter((token) => ETF_TICKERS.has(token)))];
+}
+
+export function beginnerFlairPenalty(flair?: string | null): number {
+  return /\bbeginners?\b|\bnewbie\b|\brate\s+my\s+portfolio\b|\bportfolio\s+(?:review|help|advice)\b|\bgetting\s+started\b|\bnew\s+to\s+investing\b/i.test(
+    flair ?? '',
+  )
+    ? 0.6
+    : 1;
+}
+
+export type IndexedCommentObservation = {
+  count: number;
+  observedAtUtc: string;
+};
+export type CommentGrowth = { delta: number; hours: number; perHour: number };
+
+export function indexedCommentGrowth(
+  current?: IndexedCommentObservation,
+  previous?: IndexedCommentObservation,
+): CommentGrowth | null {
+  if (!current || !previous) return null;
+  const hours =
+    (Date.parse(current.observedAtUtc) - Date.parse(previous.observedAtUtc)) /
+    3_600_000;
+  const delta = current.count - previous.count;
+  // A corrected/downward index count establishes a new baseline, not negative activity.
+  if (!Number.isFinite(hours) || hours < 0.25 || hours > 48 || delta < 0)
+    return null;
+  return { delta, hours, perHour: delta / hours };
+}
+
 export type RedditCandidate = {
   id: string;
   redditId: string;
@@ -117,6 +284,9 @@ export type RedditCandidate = {
   sourceProvider?: 'arctic-shift';
   indexedAtUtc?: string;
   discussionCount?: number;
+  flair?: string | null;
+  etfTickers?: string[];
+  indexedComments?: IndexedCommentObservation;
 };
 
 export type PreviousObservation = {
@@ -124,11 +294,13 @@ export type PreviousObservation = {
   comments: number;
   observedAtUtc: string;
   bestListingRank: number | null;
+  indexedComments?: IndexedCommentObservation;
 };
 
 export type ScoredCandidate = RedditCandidate & {
   heatScore: number;
   velocityScore: number;
+  commentGrowth?: CommentGrowth | null;
   components: {
     velocity: number;
     engagement: number;
@@ -245,7 +417,12 @@ export function calculateEtfRelevance(
   );
   const explicitEtf = /\bETFs?\b|exchange[- ]traded fund/i.test(haystack);
   const subredditBoost = subreddit.toLowerCase() === 'etfs' ? 0.22 : 0;
-  const base = explicitEtf ? 0.68 : matches > 0 ? 0.5 : 0;
+  const base =
+    explicitEtf || extractEtfTickers(title, body).length
+      ? 0.68
+      : matches > 0
+        ? 0.5
+        : 0;
   return clamp01(base + subredditBoost + Math.min(matches, 3) * 0.1);
 }
 
@@ -303,6 +480,8 @@ export function normalizeRedditPost(
     outboundUrl: isSelf || outbound === permalink ? null : outbound,
     title,
     body,
+    flair: cleanRedditMarkdown(data.link_flair_text, 200) || null,
+    etfTickers: extractEtfTickers(title, body),
     createdAtUtc: new Date(createdSeconds * 1_000).toISOString(),
     score: Math.trunc(finiteNumber(data.score)),
     comments: Math.max(0, Math.trunc(finiteNumber(data.num_comments))),
@@ -370,7 +549,13 @@ export function scoreCandidates(
   previousRanks: Map<string, number> = new Map(),
 ): ScoredCandidate[] {
   const rawVelocity = candidates.map((candidate) => {
-    if (candidate.sourceProvider === 'arctic-shift') return 0;
+    if (candidate.sourceProvider === 'arctic-shift')
+      return (
+        indexedCommentGrowth(
+          candidate.indexedComments,
+          previous.get(candidate.id)?.indexedComments,
+        )?.perHour ?? 0
+      );
     const prior = previous.get(candidate.id);
     if (!candidate.metricsAvailable) {
       if (!prior?.bestListingRank || !candidate.bestListingRank) return 0;
@@ -415,8 +600,16 @@ export function scoreCandidates(
         ? clamp01(0.5 + rawVelocity[index] / 20)
         : velocityRanks[index];
       const components = {
-        velocity: rssRankTrend,
-        engagement: rssPreview ? 0 : engagementRanks[index],
+        velocity: candidate.indexedComments
+          ? clamp01(Math.log1p(rawVelocity[index]) / Math.log1p(20))
+          : rssRankTrend,
+        engagement: candidate.indexedComments
+          ? clamp01(
+              Math.log1p(candidate.indexedComments.count) / Math.log1p(200),
+            )
+          : rssPreview
+            ? 0
+            : engagementRanks[index],
         listing: candidate.bestListingRank
           ? clamp01(1 - (candidate.bestListingRank - 1) / 50)
           : 0,
@@ -428,11 +621,25 @@ export function scoreCandidates(
       };
       const heatScore =
         candidate.sourceProvider === 'arctic-shift'
-          ? 100 *
-            (0.5 * (candidate.discussionCount ? discussionRanks[index] : 0) +
-              0.25 * components.relevance +
-              0.2 * components.freshness +
-              0.05 * components.authorInfluence)
+          ? beginnerFlairPenalty(candidate.flair) *
+            (candidate.indexedComments
+              ? 100 *
+                (0.5 *
+                  clamp01(Math.log1p(rawVelocity[index]) / Math.log1p(20)) +
+                  0.15 *
+                    clamp01(
+                      Math.log1p(candidate.indexedComments.count) /
+                        Math.log1p(200),
+                    ) +
+                  0.15 * components.relevance +
+                  0.15 * components.freshness +
+                  0.05 * components.authorInfluence)
+              : 100 *
+                (0.5 *
+                  (candidate.discussionCount ? discussionRanks[index] : 0) +
+                  0.25 * components.relevance +
+                  0.2 * components.freshness +
+                  0.05 * components.authorInfluence))
           : rssPreview
             ? 100 *
               (0.55 * components.listing +
@@ -449,6 +656,13 @@ export function scoreCandidates(
                 0.08 * components.freshness);
       return {
         ...candidate,
+        commentGrowth:
+          candidate.sourceProvider === 'arctic-shift'
+            ? indexedCommentGrowth(
+                candidate.indexedComments,
+                previous.get(candidate.id)?.indexedComments,
+              )
+            : null,
         heatScore: Math.round(heatScore * 10) / 10,
         velocityScore: Math.round(rawVelocity[index] * 1_000) / 1_000,
         components,
@@ -473,7 +687,30 @@ export function selectTopStories(
   const authors = new Map<string, number>();
   const subreddits = new Map<string, number>();
 
+  // Reserve three ticker-bearing seats before filling remaining seats by heat.
+  // Keep the author cap; when the source lacks enough eligible posts, never invent seats.
+  const tickerCandidates = ranked.filter(
+    (candidate) =>
+      candidate.sourceProvider === 'arctic-shift' &&
+      extractEtfTickers(candidate.title, candidate.body).length > 0,
+  );
+  for (const candidate of tickerCandidates) {
+    const author = candidate.author ?? '[deleted]';
+    if ((authors.get(author) ?? 0) >= 2) continue;
+    selected.push(candidate);
+    authors.set(author, (authors.get(author) ?? 0) + 1);
+    subreddits.set(
+      candidate.subreddit,
+      (subreddits.get(candidate.subreddit) ?? 0) + 1,
+    );
+    if (selected.length >= Math.min(3, limit)) break;
+  }
+  const inRankOrder = () =>
+    ranked.filter((candidate) => selected.includes(candidate));
+  if (selected.length >= limit) return inRankOrder();
+
   for (const candidate of ranked) {
+    if (selected.some((story) => story.id === candidate.id)) continue;
     const author = candidate.author ?? '[deleted]';
     const authorCount = authors.get(author) ?? 0;
     const subredditCount = subreddits.get(candidate.subreddit) ?? 0;
@@ -481,16 +718,20 @@ export function selectTopStories(
     selected.push(candidate);
     authors.set(author, authorCount + 1);
     subreddits.set(candidate.subreddit, subredditCount + 1);
-    if (selected.length === limit) return selected;
+    if (selected.length === limit) return inRankOrder();
   }
 
   for (const candidate of ranked) {
     if (selected.some((story) => story.id === candidate.id)) continue;
     if ((authors.get(candidate.author ?? '[deleted]') ?? 0) >= 2) continue;
     selected.push(candidate);
+    authors.set(
+      candidate.author ?? '[deleted]',
+      (authors.get(candidate.author ?? '[deleted]') ?? 0) + 1,
+    );
     if (selected.length === limit) break;
   }
-  return selected;
+  return inRankOrder();
 }
 
 export function logicalHourIso(timestampMs: number): string {

@@ -3,6 +3,9 @@ import {
   DEFAULT_SUBREDDITS,
   normalizeRedditPost,
   parseCsv,
+  beginnerFlairPenalty,
+  extractEtfTickers,
+  type IndexedCommentObservation,
   type RawRedditPost,
   type RedditCandidate,
 } from './core.ts';
@@ -12,7 +15,7 @@ const ORIGIN = 'https://arctic-shift.photon-reddit.com';
 const MAX_BYTES = 2_000_000;
 // Only documented selectable fields; retain text for existing local ETF filtering/translation.
 export const ARCTIC_POST_FIELDS =
-  'id,title,created_utc,author,url,num_comments,over_18,subreddit,selftext,retrieved_on';
+  'id,title,created_utc,author,url,num_comments,over_18,subreddit,selftext,retrieved_on,link_flair_text';
 export const ARCTIC_COMMENT_FIELDS = 'id,link_id,created_utc,subreddit';
 const PROJECT_USER_AGENT =
   'etfs-hot-topics/0.3 (+https://github.com/kk1030-bit/etfs-data-form-reddit)';
@@ -95,6 +98,9 @@ export type SourceDetails = {
   newestPostAt: string | null;
   newestIndexedAt: string | null;
   commentSampleSize: number;
+  commentMetric?: 'indexed-total';
+  aggregateRequested?: number;
+  aggregateSucceeded?: number;
 };
 
 function indexedTime(row: Record<string, unknown>): string | undefined {
@@ -202,10 +208,13 @@ async function requestRows(
   };
   if (!Array.isArray(payload.data))
     throw new RedditRssError('Arctic Shift invalid data response');
-  return payload.data.filter(
-    (row): row is Record<string, unknown> =>
-      Boolean(row) && typeof row === 'object' && !Array.isArray(row),
-  );
+  if (
+    payload.data.some(
+      (row) => !row || typeof row !== 'object' || Array.isArray(row),
+    )
+  )
+    throw new RedditRssError('Arctic Shift invalid data row');
+  return payload.data as Record<string, unknown>[];
 }
 
 export async function fetchIndexedCandidates(
@@ -235,7 +244,6 @@ export async function fetchIndexedCandidates(
     commentSampleSize: 0,
   };
   const counts = new Map<string, number>();
-  const commentIds = new Set<string>();
   for (const subreddit of communities) {
     try {
       const rows = await requestRows(
@@ -280,49 +288,11 @@ export async function fetchIndexedCandidates(
         `r/${subreddit}：帖子索引暂不可用（${error instanceof Error ? error.message.slice(0, 180) : 'unknown'}）。`,
       );
     }
-    try {
-      const rows = await requestRows(
-        '/api/comments/search',
-        {
-          subreddit,
-          limit: '100',
-          sort: 'desc',
-          after,
-          before,
-          fields: ARCTIC_COMMENT_FIELDS,
-        },
-        request,
-      );
-      for (const row of rows) {
-        const id = typeof row.id === 'string' ? row.id : '';
-        const link = typeof row.link_id === 'string' ? row.link_id : '';
-        if (!id || commentIds.has(id) || !/^(?:t3_)?[a-z0-9]+$/i.test(link))
-          continue;
-        if (String(row.subreddit).toLowerCase() !== subreddit.toLowerCase())
-          continue;
-        const created = Number(row.created_utc) * 1000;
-        if (
-          !Number.isFinite(created) ||
-          created < Number(after) * 1000 ||
-          created > nowMs
-        )
-          continue;
-        commentIds.add(id);
-        const postId = link.startsWith('t3_') ? link : `t3_${link}`;
-        counts.set(postId, (counts.get(postId) ?? 0) + 1);
-      }
-    } catch (error) {
-      if (error instanceof RedditRssError && error.status === 429) throw error;
-      details.warnings.push(
-        `r/${subreddit}：讨论样本暂缺，按时效和相关性排序。`,
-      );
-    }
   }
   if (!details.communities.length)
     throw new RedditRssError(
       `Arctic Shift 所有社区查询失败：${details.warnings.join(' ').slice(0, 1000)}`,
     );
-  details.commentSampleSize = commentIds.size;
   return {
     candidates: [...candidates.values()].map((post) => ({
       ...post,
@@ -350,4 +320,124 @@ export async function refreshIndexedPosts(
   return rows
     .filter((data) => requested.has(`t3_${String(data.id).toLowerCase()}`))
     .map((data) => ({ kind: 't3', data }));
+}
+
+export const MAX_AGGREGATE_CANDIDATES = 40;
+export const MAX_COMMENT_AGGREGATES = 120 + MAX_AGGREGATE_CANDIDATES;
+export const MAX_INDEXED_COMMENT_COUNT = 10_000_000;
+
+export function aggregateTargets(
+  candidates: RedditCandidate[],
+  trackedIds: string[],
+): string[] {
+  const tracked = [...new Set(trackedIds)]
+    .filter((id) => /^t3_[a-z0-9]+$/.test(id))
+    .slice(0, 120);
+  const trackedSet = new Set(tracked);
+  // Samples do not determine who gets measured. Reserve room for ticker-specific topics,
+  // and keep source diversity before using recency/relevance to fill the bounded shortlist.
+  const ranked = candidates
+    .filter((post) => !trackedSet.has(post.id))
+    .sort(
+      (a, b) =>
+        beginnerFlairPenalty(b.flair) - beginnerFlairPenalty(a.flair) ||
+        b.relevance - a.relevance ||
+        b.createdAtUtc.localeCompare(a.createdAtUtc) ||
+        a.id.localeCompare(b.id),
+    );
+  const selected = new Map<string, RedditCandidate>();
+  const add = (post: RedditCandidate) => {
+    if (selected.size < MAX_AGGREGATE_CANDIDATES) selected.set(post.id, post);
+  };
+  const tickerAuthors = new Map<string, number>();
+  for (const post of ranked.filter(
+    (post) => extractEtfTickers(post.title, post.body).length,
+  )) {
+    const author = post.author ?? '[deleted]';
+    if ((tickerAuthors.get(author) ?? 0) >= 2) continue;
+    add(post);
+    tickerAuthors.set(author, (tickerAuthors.get(author) ?? 0) + 1);
+    if (selected.size >= 20) break;
+  }
+  for (const subreddit of new Set(ranked.map((post) => post.subreddit)))
+    ranked
+      .filter((post) => post.subreddit === subreddit)
+      .slice(0, 3)
+      .forEach(add);
+  ranked.forEach(add);
+  return [...tracked, ...selected.keys()];
+}
+
+export async function fetchIndexedCommentCount(
+  postId: string,
+  fetcher: typeof fetch,
+  now: () => number = Date.now,
+): Promise<IndexedCommentObservation> {
+  if (!/^t3_[a-z0-9]+$/.test(postId))
+    throw new Error('Invalid aggregate post ID');
+  const result = await requestRows(
+    '/api/comments/search/aggregate',
+    {
+      link_id: postId,
+      aggregate: 'subreddit',
+      limit: '1',
+    },
+    fetcher,
+  );
+  if (result.length > 1) throw new RedditRssError('Invalid comment aggregate');
+  const rawCount = result.length ? result[0].count : 0;
+  if (
+    (typeof rawCount !== 'number' && typeof rawCount !== 'string') ||
+    (typeof rawCount === 'string' && !/^\d+$/.test(rawCount))
+  )
+    throw new RedditRssError('Invalid comment aggregate count');
+  const count = Number(rawCount);
+  if (
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    count > MAX_INDEXED_COMMENT_COUNT
+  )
+    throw new RedditRssError('Invalid comment aggregate count');
+  return { count, observedAtUtc: new Date(now()).toISOString() };
+}
+
+export async function collectIndexedCommentCounts(
+  candidates: RedditCandidate[],
+  trackedIds: string[],
+  details: SourceDetails,
+  fetcher: typeof fetch,
+  now: () => number = Date.now,
+  maxDurationMs = 8 * 60_000,
+): Promise<Map<string, IndexedCommentObservation>> {
+  const targets = aggregateTargets(candidates, trackedIds);
+  const counts = new Map<string, IndexedCommentObservation>();
+  const deadline = now() + maxDurationMs;
+  for (const id of targets) {
+    if (now() >= deadline) break;
+    try {
+      counts.set(id, await fetchIndexedCommentCount(id, fetcher, now));
+    } catch (error) {
+      // A missing/error response is unknown, never zero. Preserve the existing cooldown.
+      if (error instanceof RedditRssError && error.status === 429) throw error;
+    }
+  }
+  details.commentMetric = 'indexed-total';
+  details.aggregateRequested = targets.length;
+  details.aggregateSucceeded = counts.size;
+  if (counts.size < targets.length)
+    details.warnings.push(
+      `逐帖计数完成 ${counts.size}/${targets.length}；缺失计数不参与本轮榜单，也不视为零。`,
+    );
+  const measuredCandidates = candidates.filter((post) =>
+    counts.has(post.id),
+  ).length;
+  if (candidates.length > measuredCandidates)
+    details.warnings.push(
+      `本轮 ${candidates.length} 篇候选中 ${measuredCandidates} 篇完成逐帖计数；新增候选计数上限 40，另行刷新全部追踪帖。`,
+    );
+  if (candidates.length && !measuredCandidates)
+    throw new RedditRssError(
+      'Arctic Shift candidate comment aggregates unavailable',
+    );
+  return counts;
 }

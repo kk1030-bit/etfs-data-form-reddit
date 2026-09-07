@@ -39,6 +39,7 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { LeadTopics } from '@/components/lead-topics';
+import { commentMetricLabel, commentGrowthLabel } from '@/lib/comment-metric';
 import {
   Dialog,
   DialogContent,
@@ -198,7 +199,10 @@ function StoryDetail({
           <p className="text-xs text-white/60">
             索引快照：{formatBeijing(story.indexedAt, true)} · Arctic Shift
             <br />
-            讨论数是已索引样本，不代表总留言或浏览量。
+            {commentMetricLabel(story)}。索引可能延迟或补收，不代表 Reddit
+            实时总留言或浏览量。
+            <br />
+            {commentGrowthLabel(story)}
           </p>
         ) : null}
         <div className="rounded-xl bg-white/7 p-3">
@@ -636,9 +640,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 >
                   <p className="font-medium">Reddit ETF 讨论观察</p>
                   <p className="mt-1 leading-6 text-muted-foreground">
-                    每小时检索六个社区最近 24 小时的帖子。根据近期留言样本、ETF
-                    相关性和新鲜度筛选前五篇；指数不是实际流量，也不是官方 KOL
-                    排名。
+                    每小时检索六个社区最近 24
+                    小时的帖子。按逐帖已索引留言增速、总数、ETF
+                    相关性和新鲜度排名；新手类 flair
+                    降权，候选足够时前五至少三篇含具体 ETF 代号。
+                    指数不是实际流量，也不是官方 KOL 排名；首次计数先建立基准。
                   </p>
                   <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
                     <span>
@@ -646,8 +652,9 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       {formatBeijing(data.sourceDetails?.newestPostAt, true)}
                     </span>
                     <span>
-                      本轮讨论样本：{data.sourceDetails?.commentSampleSize ?? 0}{' '}
-                      条
+                      {data.sourceDetails?.commentMetric === 'indexed-total'
+                        ? `逐帖计数：${data.sourceDetails.aggregateSucceeded ?? 0} / ${data.sourceDetails.aggregateRequested ?? 0} 篇`
+                        : `旧版讨论样本：${data.sourceDetails?.commentSampleSize ?? 0} 条`}
                     </span>
                     <span>
                       有效社区：{data.sourceDetails?.communities?.length ?? 0} /
@@ -849,6 +856,13 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                         </CardHeader>
                         <CardContent>
                           <TrendBars values={story.trend} />
+                          {story.sourceProvider === 'arctic-shift' ? (
+                            <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                              {commentMetricLabel(story)}
+                              <br />
+                              {commentGrowthLabel(story)}
+                            </p>
+                          ) : null}
                           <div className="mt-4 grid grid-cols-3 gap-2 text-center">
                             <div>
                               <p className="font-mono text-base font-semibold">
@@ -1267,7 +1281,7 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       </CardHeader>
                       <CardContent className="text-xs leading-5 text-muted-foreground">
                         {isIndexed
-                          ? 'Arctic Shift 公开索引 API，无需付费密钥。各社区最多读取 100 篇帖子和 100 条近期留言样本，每小时一次。明确排除已删除、成人和不可索引帖子；来源限流时自动冷却。'
+                          ? 'Arctic Shift 公开索引 API，无需付费密钥。每小时读取各社区最多 100 篇帖子，逐帖计数最多 40 篇新增候选及全部追踪帖；不读取留言正文。计数可能有索引延迟和补收，按实际观测间隔计算增速。排除来源可识别的删除和成人内容；限流时自动冷却。'
                           : isRssPreview
                             ? '每小时检查一次；只有冷却结束才请求公开合并 RSS。遇到 429 后按 1、2、4、8、16、24 小时逐步退避，并遵守更长的 Retry-After。冷却期间不补抓、不密集重试，旧榜单明确标记为上次成功资料。RSS 不提供点赞、评论数或浏览量。'
                             : 'OAuth 模式使用 Reddit Data API 的公开帖子与互动指标，不提供可依赖的真实浏览量。'}
