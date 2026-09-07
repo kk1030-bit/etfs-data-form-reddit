@@ -1,4 +1,5 @@
 import { ETF_TICKERS } from './core.ts';
+import { DEEP_ANALYSIS_MIN_SCORE } from './deep-analysis-policy.ts';
 import type { DeepPost } from './deep-analysis-source.ts';
 
 // This experiment does not change the hourly Top 5 whitelist or ranking.
@@ -241,7 +242,7 @@ export function scoreDeepAnalysis(
     ) / 100;
   return {
     eligible: reasons.length === 0,
-    finalist: reasons.length === 0 && score >= 55,
+    finalist: reasons.length === 0 && score >= DEEP_ANALYSIS_MIN_SCORE,
     score,
     rejectionReasons: reasons,
     flairDecision,

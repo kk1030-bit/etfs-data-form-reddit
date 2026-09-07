@@ -8,7 +8,7 @@
 - 查询社区：Bogleheads、ETFs、LETFs、investing、SecurityAnalysis、bonds、factorinvesting。
 - 缺少或未分类 flair 继续按正文评分；命中拒绝正则的排除。基础评分沿用已确认公式。
 - 最近 **7 × 24 小时**以 Reddit 原始 `created_utc` 判断，不能使用 `retrieved_on`、采集时间或 AI 完成时间替代。无效、未来、过期日期排除。
-- 先过初评分 55 分与 AI 审查，再按发布时间降序；同一时间按最终分数降序。不会为了新鲜度降低质量门槛，也不拿旧文章填空。
+- 用户复核首次回填后，将初评分门槛从 55 分降为 **35 分**，其余加扣分、AI 审查与最近 7 天限制不变。先过初评与 AI 审查，再按发布时间降序；同一时间按最终分数降序，不拿旧文章填空。进入决赛圈不等于一定上榜。
 - 「新」依据原帖发布时间是否在北京时间昨天零点以后，避免旧文补收冒充新文。
 
 ## 请求及保存
@@ -32,6 +32,7 @@ Arctic 当前不支持 `fields` 中的 `is_self` 和 `domain`，已在首次回�
 
 - 日期与排序：`lib/collector/deep-analysis-dates.ts`
 - 评分：`lib/collector/deep-analysis.ts`
+- 初评门槛（采集、入库、页面说明及回填报告共用）：`lib/collector/deep-analysis-policy.ts`
 - 来源读取：`lib/collector/deep-analysis-daily.ts`
 - AI：`lib/collector/deep-analysis-ai.ts`
 - 入库／去重／读取：`lib/collector/deep-analysis-store.ts`

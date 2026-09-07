@@ -8,6 +8,7 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import type { DeepData } from '@/lib/collector/deep-analysis-store';
+import { DEEP_ANALYSIS_MIN_SCORE } from '@/lib/collector/deep-analysis-policy';
 import {
   compareDeepRecent,
   deepIsNew,
@@ -86,7 +87,7 @@ export function DeepAnalysisView({
                 : '最近 7 天暂无通过审查的分析文章'}
           </p>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            仅展示初评分至少 55
+            仅展示初评分至少 {DEEP_ANALYSIS_MIN_SCORE}
             分且通过内容审查的文章，不用旧文或未审查内容补位。
           </p>
         </div>

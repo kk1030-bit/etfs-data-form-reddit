@@ -29,6 +29,44 @@ function post(overrides: Partial<DeepPost> = {}): DeepPost {
 }
 const score = (item: DeepPost) => scoreDeepAnalysis(item, 'reject-matched');
 
+void test('approved base threshold admits exactly 35 but not 34.99', () => {
+  const accepted = score(
+    post({
+      selftext:
+        '# Research\nVOO VTI VXUS BND QQQ\n| A | B |\n| --- | --- |\n'.padEnd(
+          1500,
+          'x',
+        ),
+    }),
+  );
+  assert.equal(accepted.score, 35);
+  assert.equal(accepted.finalist, true);
+  const below = score(
+    post({ selftext: 'VOO VTI BND QQQ 1 2 3 '.padEnd(3030, 'x') }),
+  );
+  assert.equal(below.score, 34.99);
+  assert.equal(below.eligible, true);
+  assert.equal(below.finalist, false);
+});
+
+void test('lower base threshold does not waive penalties or rejection gates', () => {
+  const item = post({
+    selftext:
+      '# Research\nVOO VTI VXUS BND QQQ\n| A | B |\n| --- | --- |\n'.padEnd(
+        1500,
+        'x',
+      ),
+  });
+  const penalized = score({ ...item, title: 'Should I get advice?' });
+  assert.equal(penalized.points.questionPenalty, -15);
+  assert.equal(penalized.points.helpPenalty, -20);
+  assert.equal(penalized.finalist, false);
+  const rejected = score({ ...item, link_flair_text: 'Portfolio Review' });
+  assert.equal(rejected.score, 35);
+  assert.equal(rejected.finalist, false);
+  assert.ok(rejected.rejectionReasons.includes('rejected_flair'));
+});
+
 void test('the topic gate uses body-only whole uppercase fund symbols or three distinct macro terms', () => {
   assert.equal(
     score(

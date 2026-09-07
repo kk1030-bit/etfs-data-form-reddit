@@ -2,6 +2,8 @@
 
 本阶段只执行用户要求的三社区回填与初评。未接入网站、D1、AI、每日排程或周报，也未发布。
 
+以上及下述 55 分门槛记录首次回填时的历史规则。后续用户确认将初评门槛改为 35 分，扣分、AI 审查和最近 7 天限制不变；当前实现见 `deep-analysis.md`。重新运行评分脚本会按当前门槛生成报告，不代表首次结果。
+
 ## 已确认的规则
 
 - 回填社区：Bogleheads、LETFs、SecurityAnalysis；各一个 `after=30d&limit=auto&sort=desc` 请求，不自行分页。
@@ -13,7 +15,7 @@
 
 ## 评分模块
 
-`lib/collector/deep-analysis.ts` 导出 `scoreDeepAnalysis(post, 'reject-matched')`，返回总分、是否通过闸门、是否达到 55 分、拒绝原因及各项明细。模块仅使用标准 JavaScript/Web API，不依赖 Node、数据库或网络，可供 Cloudflare 调用。
+`lib/collector/deep-analysis.ts` 导出 `scoreDeepAnalysis(post, 'reject-matched')`，返回总分、是否通过闸门、是否达到当前初评门槛、拒绝原因及各项明细。门槛由 `deep-analysis-policy.ts` 统一定义。模块仅使用标准 JavaScript/Web API，不依赖 Node、数据库或网络，可供 Cloudflare 调用。
 
 专栏白名单为 140 个 ETF 代号；Bogleheads 另加 16 个共同基金代号，共 156 个，不修改现有 Top 5 白名单。代号匹配正文中的大写完整词，不把标题提及当正文命中。宏观词按不同词项计数，`rebalanc` 支持前缀匹配。
 

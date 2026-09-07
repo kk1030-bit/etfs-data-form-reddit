@@ -192,6 +192,44 @@ void test('daily source uses seven 72h searches, newest eligible first, at most 
   );
   validateDeepSnapshot(result, now, now);
 });
+void test('daily collection and server validation share the 35-point base threshold', async () => {
+  const accepted = post('at35', {
+    selftext:
+      '# Research\nVOO VTI VXUS BND QQQ\n| A | B |\n| --- | --- |\n'.padEnd(
+        1500,
+        'x',
+      ),
+  });
+  const below = post('below35', {
+    selftext: 'VOO VTI BND QQQ 1 2 3 '.padEnd(3030, 'x'),
+  });
+  const result = await collectDeepDaily(
+    { seenIds: [], authors: [] },
+    async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.endsWith('/aggregate') || url.searchParams.has('author'))
+        return ok([]);
+      return ok(
+        url.searchParams.get('subreddit') === 'Bogleheads'
+          ? [accepted, below]
+          : [],
+      );
+    },
+    now,
+    noSleep,
+  );
+  assert.deepEqual(
+    result.finalists.map((f) => f.post.id),
+    ['at35'],
+  );
+  assert.equal(result.requests, 9);
+  assert.doesNotThrow(() => validateDeepSnapshot(result, now, now));
+  assert.throws(
+    () => validateDeepSnapshot(snapshot([below]), now, now),
+    /Ineligible/,
+  );
+});
+
 void test('seven-day dedup and cached author history avoid repeat enrichment requests', async () => {
   let calls = 0;
   const mock: typeof fetch = async (input) => {

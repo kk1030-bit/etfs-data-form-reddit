@@ -5,6 +5,7 @@ import {
   BOGLEHEADS_FUND_TICKERS,
 } from '../lib/collector/deep-analysis.ts';
 import type { DeepBackfill } from '../lib/collector/deep-analysis-source.ts';
+import { DEEP_ANALYSIS_MIN_SCORE } from '../lib/collector/deep-analysis-policy.ts';
 import {
   deepPublishedMs,
   compareDeepRecent,
@@ -73,6 +74,7 @@ const report = {
   requests: data.requests,
   policy: 'reject-matched',
   scoreStage: 'base-only; no commenter/author bonus and no AI',
+  minimumBaseScore: DEEP_ANALYSIS_MIN_SCORE,
   formula:
     'Structure: each type 5 (max 15); density: each number per 1000 characters 1 (max 15); topic: each distinct ticker/macro term 1 (max 10)',
   whitelist: {
@@ -100,13 +102,13 @@ const markdown = [
   '# 深度分析：首次回填评分',
   '',
   `采集于 ${data.fetchedAt}；仅 ${data.requests} 个回填请求。`,
-  `取得 ${report.collected} 篇，通过正文与 flair 闸门 ${report.eligible} 篇，初评分 ≥55 共 ${report.finalists} 篇。`,
-  '下表为通过闸门的前 20 名；低于 55 分者不进入决赛圈。不含独立留言者／作者历史加分，未运行 AI。',
+  `取得 ${report.collected} 篇，通过正文与 flair 闸门 ${report.eligible} 篇，初评分 ≥${DEEP_ANALYSIS_MIN_SCORE} 共 ${report.finalists} 篇。`,
+  `下表为通过闸门的前 20 名；低于 ${DEEP_ANALYSIS_MIN_SCORE} 分者不进入决赛圈。不含独立留言者／作者历史加分，未运行 AI。`,
   'limit=auto 不保证穷尽过去 30 天；正文仅用于本地评分，未进入网站、D1 或 AI。',
   '',
   `## 新增日期规则复核（截至 ${new Date(reviewedAt).toISOString()}）`,
   '',
-  `发布在最近 7 天且初评分 ≥55：${recentFinalists.length} 篇。按原帖发布时间由新到旧，不以抓取时间代替。仍未运行 AI。`,
+  `发布在最近 7 天且初评分 ≥${DEEP_ANALYSIS_MIN_SCORE}：${recentFinalists.length} 篇。按原帖发布时间由新到旧，不以抓取时间代替。仍未运行 AI。`,
   ...recentFinalists.map(
     (p) =>
       `- ${p.publishedAt} · ${p.score} 分 · [${cell(p.title)}](${p.permalink})`,
@@ -114,7 +116,7 @@ const markdown = [
   '',
   '## 原始 30 天回填：按初评分的前 20 名（包含旧文，仅供审阅）',
   '',
-  '| 排名 | 初评分 | 社群 | 标题 | flair | ≥55 |',
+  `| 排名 | 初评分 | 社群 | 标题 | flair | ≥${DEEP_ANALYSIS_MIN_SCORE} |`,
   '| --- | ---: | --- | --- | --- | --- |',
   ...top20.map(
     (post) =>
