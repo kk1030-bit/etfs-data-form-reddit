@@ -37,6 +37,8 @@ import {
   RssDeferredError,
   withRssCooldown,
   readRssSourceState,
+  prepareArcticContext,
+  workerArcticContext,
 } from './rss-cooldown.ts';
 import { collectTitleFallback } from './title-fallback.ts';
 import type { RunStage } from './collection-status.ts';
@@ -90,6 +92,7 @@ async function acquireJob(
   kind: JobKind,
   logicalTimeUtc: string,
   sourceMode = '',
+  executionContext: string | null = null,
 ): Promise<boolean> {
   const id = `${kind}:${logicalTimeUtc}`;
   const now = new Date().toISOString();
@@ -108,11 +111,17 @@ async function acquireJob(
           OR (job_runs.status IN ('cooldown', 'deferred') AND EXISTS (
             SELECT 1 FROM hourly_runs hr
             WHERE hr.logical_hour_utc = job_runs.logical_time_utc
-              AND (hr.retry_at_utc <= excluded.started_at_utc OR (?6 <> '' AND hr.source_mode <> ?6))
+              AND (hr.retry_at_utc <= excluded.started_at_utc OR (?6 <> '' AND hr.source_mode <> ?6)
+                OR (?6 = 'arctic-shift' AND EXISTS (
+                  SELECT 1 FROM reddit_source_state s WHERE s.source = 'arctic-shift'
+                    AND s.execution_context = ?7
+                    AND (s.cooldown_until_utc IS NULL OR s.cooldown_until_utc <= excluded.started_at_utc)
+                    AND (s.lease_until_utc IS NULL OR s.lease_until_utc <= excluded.started_at_utc)
+                )))
           ))
           OR (job_runs.status = 'running' AND job_runs.started_at_utc < ?5)`,
     )
-    .bind(id, kind, logicalTimeUtc, now, stale, sourceMode)
+    .bind(id, kind, logicalTimeUtc, now, stale, sourceMode, executionContext)
     .run();
   return Number(result.meta.changes ?? 0) > 0;
 }
@@ -666,6 +675,7 @@ export async function runHourly(
   externalArctic?: {
     snapshot?: ArcticSnapshot;
     failure?: { status?: number; retryAfter?: string };
+    executionContext?: string;
   },
 ): Promise<JobResult> {
   const logicalHour = logicalHourIso(scheduledAtMs);
@@ -686,7 +696,26 @@ export async function runHourly(
   const retentionHours = clampRawRetentionHours(
     env.RAW_CONTENT_RETENTION_HOURS,
   );
-  if (!(await acquireJob(env.DB, 'hourly', logicalHour, sourceMode))) {
+  const executionContext =
+    sourceMode === 'arctic-shift'
+      ? (externalArctic?.executionContext ?? workerArcticContext())
+      : null;
+  if (executionContext) {
+    if (externalArctic?.executionContext) {
+      const state = await readRssSourceState(env.DB, 'arctic-shift');
+      if (state?.execution_context !== executionContext)
+        throw new Error('Stale Arctic execution context');
+    } else await prepareArcticContext(env.DB, executionContext);
+  }
+  if (
+    !(await acquireJob(
+      env.DB,
+      'hourly',
+      logicalHour,
+      sourceMode,
+      executionContext,
+    ))
+  ) {
     if (sourceMode === 'arctic-shift') {
       const sourceState = await readRssSourceState(env.DB, 'arctic-shift');
       if (
@@ -770,6 +799,7 @@ export async function runHourly(
             collect,
             Date.now,
             session.mode === 'arctic-shift' ? 'arctic-shift' : 'reddit-rss',
+            executionContext ?? undefined,
           )
         : await collect();
     await env.DB.prepare(

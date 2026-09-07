@@ -19,10 +19,14 @@ import {
   readRssSourceState,
   withRssCooldown,
   RssDeferredError,
+  prepareArcticContext,
+  resetArcticCooldown,
 } from '../lib/collector/rss-cooldown.ts';
 import { RedditRssError } from '../lib/collector/reddit-rss.ts';
 import { testDb } from './d1-test-db.ts';
 import { parseArcticSnapshot } from '../lib/collector/arctic-snapshot.ts';
+import { diagnosticArcticFetcher } from '../scripts/arctic-diagnostics.ts';
+import { collectorExecutionContext } from '../scripts/collector-execution-context.ts';
 import {
   cooldownDeadline,
   nextHourlyCheck,
@@ -44,6 +48,73 @@ const post = (id = 'abc123', extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const response = (data: unknown[]) => Response.json({ data });
+
+void test('Collector context changes with local or runner code revision, never with workflow run ID', () => {
+  const sha1 = 'a'.repeat(40),
+    sha2 = 'b'.repeat(40);
+  assert.notEqual(
+    collectorExecutionContext({}, () => sha1),
+    collectorExecutionContext({}, () => sha2),
+  );
+  const context = collectorExecutionContext({
+    GITHUB_ACTIONS: 'true',
+    GITHUB_SHA: sha1,
+    GITHUB_RUN_ID: '1',
+  });
+  assert.equal(
+    context,
+    collectorExecutionContext({
+      GITHUB_ACTIONS: 'true',
+      GITHUB_SHA: sha1,
+      GITHUB_RUN_ID: '2',
+    }),
+  );
+  assert.notEqual(
+    context,
+    collectorExecutionContext({ GITHUB_ACTIONS: 'true', GITHUB_SHA: sha2 }),
+  );
+  assert.notEqual(
+    context,
+    collectorExecutionContext({}, () => sha1),
+  );
+  assert.throws(
+    () => collectorExecutionContext({}, () => 'development'),
+    /invalid/,
+  );
+});
+
+void test('Invalid server retry values are marked as fallback so code changes clear that cooldown', async (t) => {
+  const fixture = testDb();
+  t.after(fixture.close);
+  let previous = 'v0';
+  await prepareArcticContext(fixture.db, previous, now);
+  for (const retry of [
+    'garbage',
+    '9'.repeat(100),
+    'Mon, 01 Jan 2001 00:00:00 GMT',
+  ]) {
+    await assert.rejects(
+      withRssCooldown(
+        fixture.db,
+        () => Promise.reject(new RedditRssError('limited', 429, retry)),
+        () => now,
+        'arctic-shift',
+        previous,
+      ),
+      RssDeferredError,
+    );
+    assert.equal(
+      (await readRssSourceState(fixture.db, 'arctic-shift'))?.cooldown_origin,
+      'fallback',
+    );
+    previous += 'x';
+    assert.equal(
+      (await prepareArcticContext(fixture.db, previous, now))
+        .cooldown_until_utc,
+      null,
+    );
+  }
+});
 
 void test('GitHub collector script transports cleaned tracking text and only projected queries (mocked network)', async (t) => {
   const original = globalThis.fetch;
@@ -77,6 +148,10 @@ void test('GitHub collector script transports cleaned tracking text and only pro
         });
       assert.equal(typeof init.body, 'string');
       const submitted = JSON.parse(init.body as string);
+      if (submitted.action === 'prepare') {
+        assert.match(submitted.executionContext, /^(local|github-actions):/);
+        return Response.json({ status: 'prepared' });
+      }
       const snapshot = parseArcticSnapshot(
         submitted.snapshot,
         { REDDIT_SUBREDDITS: 'ETFs' },
@@ -100,6 +175,202 @@ void test('GitHub collector script transports cleaned tracking text and only pro
     new URL('../scripts/collect-arctic-index.ts', import.meta.url).href
   );
   assert.equal(uploaded, true);
+});
+
+void test('Arctic diagnostics logs 429 status, all exposed headers and only the first 500 Unicode characters', async () => {
+  const logs: string[] = [];
+  const fetcher = diagnosticArcticFetcher(
+    async () =>
+      new Response('😀'.repeat(501), {
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: {
+          'X-RateLimit-Reset': '18',
+          'X-Test-Header': 'complete',
+          'Content-Type': 'text/html',
+        },
+      }),
+    (s) => logs.push(s),
+  );
+  const result = await fetcher(
+    'https://arctic-shift.photon-reddit.com/api/posts/search',
+  );
+  assert.equal(result.status, 429);
+  assert.ok(logs.some((s) => s.includes('HTTP 429 Too Many Requests')));
+  assert.ok(logs.includes('x-ratelimit-reset: 18'));
+  assert.ok(logs.includes('x-test-header: complete'));
+  assert.ok(logs.includes('content-type: text/html'));
+  assert.ok(logs.includes('😀'.repeat(500)));
+  assert.ok(!logs.includes('😀'.repeat(501)));
+  assert.match(logs[0], /^::stop-commands::/);
+  await assert.rejects(fetcher('https://example.org'), /restricted/);
+});
+
+void test('Arctic diagnostics distinguishes empty bodies and leaves successful bodies readable', async () => {
+  const logs: string[] = [];
+  await diagnosticArcticFetcher(
+    async () => new Response(null, { status: 429 }),
+    (s) => logs.push(s),
+  )('https://arctic-shift.photon-reddit.com/');
+  assert.ok(logs.some((s) => s.includes('empty body')));
+  const ok = await diagnosticArcticFetcher(
+    async () => Response.json({ data: [] }),
+    (s) => logs.push(s),
+  )('https://arctic-shift.photon-reddit.com/');
+  assert.deepEqual(await ok.json(), { data: [] });
+});
+
+void test('Arctic context changes reset fallback levels once; next headerless 429 starts at one hour', async (t) => {
+  const fixture = testDb();
+  t.after(fixture.close);
+  const fail = () => Promise.reject(new RedditRssError('limited', 429));
+  await prepareArcticContext(fixture.db, 'github-actions:v1', now);
+  await assert.rejects(
+    withRssCooldown(
+      fixture.db,
+      fail,
+      () => now,
+      'arctic-shift',
+      'github-actions:v1',
+    ),
+    RssDeferredError,
+  );
+  const prior = await readRssSourceState(fixture.db, 'arctic-shift');
+  assert.equal(prior?.cooldown_origin, 'fallback');
+  assert.deepEqual(
+    await prepareArcticContext(fixture.db, 'github-actions:v1', now),
+    prior,
+  );
+  const switched = await prepareArcticContext(
+    fixture.db,
+    'github-actions:v2',
+    now,
+  );
+  assert.equal(switched.consecutive_429, 0);
+  assert.equal(switched.cooldown_until_utc, null);
+  await assert.rejects(
+    withRssCooldown(
+      fixture.db,
+      fail,
+      () => now,
+      'arctic-shift',
+      'github-actions:v2',
+    ),
+    RssDeferredError,
+  );
+  const next = await readRssSourceState(fixture.db, 'arctic-shift');
+  assert.equal(next?.consecutive_429, 1);
+  assert.equal(next?.cooldown_until_utc, new Date(now + 3600000).toISOString());
+  const envChanged = await prepareArcticContext(
+    fixture.db,
+    'cloudflare-worker:v2',
+    now,
+  );
+  assert.equal(envChanged.consecutive_429, 0);
+  assert.equal(envChanged.cooldown_until_utc, null);
+});
+
+void test('Arctic context reset preserves server and unknown legacy deadlines and refuses active leases', async (t) => {
+  const fixture = testDb();
+  t.after(fixture.close);
+  await prepareArcticContext(fixture.db, 'github-actions:v1', now);
+  await assert.rejects(
+    withRssCooldown(
+      fixture.db,
+      () => Promise.reject(new RedditRssError('limited', 429, '18')),
+      () => now,
+      'arctic-shift',
+      'github-actions:v1',
+    ),
+    RssDeferredError,
+  );
+  const changed = await prepareArcticContext(
+    fixture.db,
+    'github-actions:v2',
+    now,
+  );
+  assert.equal(changed.cooldown_origin, 'server');
+  assert.equal(changed.consecutive_429, 0);
+  assert.equal(changed.cooldown_until_utc, new Date(now + 18000).toISOString());
+  fixture.sqlite.exec(
+    "UPDATE reddit_source_state SET execution_context = NULL, cooldown_origin = NULL WHERE source = 'arctic-shift'",
+  );
+  const legacy = await prepareArcticContext(
+    fixture.db,
+    'github-actions:v3',
+    now,
+  );
+  assert.equal(legacy.cooldown_until_utc, changed.cooldown_until_utc);
+  fixture.sqlite
+    .prepare(
+      "UPDATE reddit_source_state SET lease_token = 'busy', lease_until_utc = ? WHERE source = 'arctic-shift'",
+    )
+    .run(new Date(now + 60000).toISOString());
+  const before = await readRssSourceState(fixture.db, 'arctic-shift');
+  await assert.rejects(
+    prepareArcticContext(fixture.db, 'github-actions:v4', now),
+    RssDeferredError,
+  );
+  await assert.rejects(resetArcticCooldown(fixture.db, now), RssDeferredError);
+  assert.deepEqual(
+    await readRssSourceState(fixture.db, 'arctic-shift'),
+    before,
+  );
+});
+
+void test('Explicit Arctic reset reopens same-hour cooldown ingestion without deleting history or other sources', async (t) => {
+  const fixture = testDb();
+  t.after(fixture.close);
+  const env = {
+    DB: fixture.db,
+    REDDIT_SOURCE_MODE: 'arctic_shift',
+    REDDIT_SUBREDDITS: 'ETFs',
+    ARCTIC_SHIFT_EXTERNAL: '1',
+    TITLE_INDEX_EXTERNAL: '1',
+  };
+  const context = 'github-actions:test';
+  await prepareArcticContext(fixture.db, context);
+  fixture.sqlite.exec(
+    "INSERT INTO reddit_source_state (source, consecutive_429) VALUES ('reddit-rss', 16)",
+  );
+  const first = await runHourly(env, now, {
+    executionContext: context,
+    failure: { status: 429 },
+  });
+  assert.equal(first.status, 'cooldown');
+  const reset = await resetArcticCooldown(fixture.db);
+  assert.equal(reset.before?.consecutive_429, 1);
+  assert.equal(reset.after?.consecutive_429, 0);
+  assert.equal(reset.after?.cooldown_until_utc, null);
+  assert.equal(
+    (await readRssSourceState(fixture.db, 'reddit-rss'))?.consecutive_429,
+    16,
+  );
+  const snapshot = parseArcticSnapshot(
+    {
+      candidates: [normalizeIndexedPost(post())],
+      trackedRaw: [],
+      commentCounts: [],
+      details: { communities: ['ETFs'], warnings: [] },
+    },
+    env,
+    now,
+  );
+  const retried = await runHourly(env, now, {
+    executionContext: context,
+    snapshot,
+  });
+  assert.equal(retried.status, 'completed');
+  await resetArcticCooldown(fixture.db);
+  assert.equal(
+    (await runHourly(env, now, { executionContext: context, snapshot })).status,
+    'skipped',
+  );
+  await prepareArcticContext(fixture.db, 'github-actions:new');
+  await assert.rejects(
+    runHourly(env, now, { executionContext: context, snapshot }),
+    /Stale Arctic/,
+  );
 });
 
 void test('Arctic headers override long fallback; reset supports seconds, epoch timestamps and invalid headers', () => {

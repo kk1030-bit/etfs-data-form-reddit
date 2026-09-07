@@ -5,7 +5,12 @@ import {
   logicalHourIso,
   parseCsv,
 } from '@/lib/collector/core';
-import { readRssSourceState } from '@/lib/collector/rss-cooldown';
+import {
+  readRssSourceState,
+  prepareArcticContext,
+  resetArcticCooldown,
+  RssDeferredError,
+} from '@/lib/collector/rss-cooldown';
 import { redditSourceMode } from '@/lib/collector/reddit';
 import { parseArcticSnapshot } from '@/lib/collector/arctic-snapshot';
 import { runHourly, type CollectorEnv } from '@/lib/collector/jobs';
@@ -49,6 +54,8 @@ export async function GET(request: Request) {
     ) ||
     (run?.status === 'running' &&
       Date.parse(run.started_at_utc) > now - 20 * 60000);
+  if (request.headers.get('x-collector-context') !== state?.execution_context)
+    return json({ error: 'Prepare collector context first' }, 409);
   return json({
     needed:
       runtime.ARCTIC_SHIFT_EXTERNAL === '1' &&
@@ -57,6 +64,7 @@ export async function GET(request: Request) {
       !busy &&
       run?.status !== 'completed',
     cooldownUntil: state?.cooldown_until_utc ?? null,
+    executionContext: state?.execution_context,
     scheduledAtMs: now,
     logicalHour: hour,
     subreddits: parseCsv(runtime.REDDIT_SUBREDDITS, DEFAULT_SUBREDDITS).slice(
@@ -96,12 +104,32 @@ export async function POST(request: Request) {
   }
   raw += decoder.decode();
   let input: {
+    action?: string;
+    executionContext?: string;
     scheduledAtMs: number;
     snapshot?: unknown;
     failure?: { status?: number; retryAfter?: string };
   };
   try {
     input = JSON.parse(raw);
+    const context = input.executionContext;
+    if (
+      typeof context !== 'string' ||
+      !/^(github-actions|local):[A-Za-z0-9._:-]{1,160}$/.test(context)
+    )
+      return json({ error: 'Valid collector context required' }, 400);
+    if (input.action === 'prepare') {
+      const state = await prepareArcticContext(runtime.DB, context);
+      return json({
+        status: 'prepared',
+        executionContext: state.execution_context,
+        consecutive429: state.consecutive_429,
+        cooldownUntil: state.cooldown_until_utc,
+      });
+    }
+    const state = await readRssSourceState(runtime.DB, 'arctic-shift');
+    if (state?.execution_context !== context)
+      return json({ error: 'Stale collector context' }, 409);
     if (
       !Number.isFinite(input.scheduledAtMs) ||
       input.scheduledAtMs > Date.now() ||
@@ -121,15 +149,46 @@ export async function POST(request: Request) {
     )
       throw new Error('Invalid failure');
     const external = input.failure
-      ? { failure: input.failure }
-      : { snapshot: parseArcticSnapshot(input.snapshot, runtime) };
+      ? { failure: input.failure, executionContext: context }
+      : {
+          snapshot: parseArcticSnapshot(input.snapshot, runtime),
+          executionContext: context,
+        };
     const result = await runHourly(runtime, input.scheduledAtMs, external);
     return json(result);
   } catch (error) {
+    if (error instanceof RssDeferredError)
+      return json(
+        { error: 'Collector in progress', retryAtUtc: error.retryAtUtc },
+        409,
+      );
     console.error(
       'Arctic ingest failed',
       error instanceof Error ? error.message : 'Unknown error',
     );
     return json({ error: 'Arctic ingestion failed' }, 422);
+  }
+}
+
+// Deliberate operator reset, never called by the scheduled collector.
+export async function DELETE(request: Request) {
+  const runtime = env as unknown as Runtime;
+  if (
+    !runtime.JOB_SECRET ||
+    request.headers.get('authorization') !== `Bearer ${runtime.JOB_SECRET}`
+  )
+    return json({ error: 'Unauthorized' }, 401);
+  try {
+    return json({
+      status: 'reset',
+      ...(await resetArcticCooldown(runtime.DB)),
+    });
+  } catch (error) {
+    if (error instanceof RssDeferredError)
+      return json(
+        { error: 'Collector in progress', retryAtUtc: error.retryAtUtc },
+        409,
+      );
+    return json({ error: 'Reset failed' }, 500);
   }
 }

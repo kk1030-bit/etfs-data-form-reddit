@@ -5,6 +5,10 @@ import {
 } from '../lib/collector/arctic-shift.ts';
 import { RedditRssError } from '../lib/collector/reddit-rss.ts';
 import { cleanRedditMarkdown } from '../lib/collector/core.ts';
+import { diagnosticArcticFetcher } from './arctic-diagnostics.ts';
+import { collectorExecutionContext } from './collector-execution-context.ts';
+
+const executionContext = collectorExecutionContext();
 
 const endpoint =
   'https://etfs-hot-topics.wangguancc.chatgpt.site/api/internal/arctic-index';
@@ -13,7 +17,18 @@ if (!process.env.TITLE_INGEST_TOKEN || !process.env.SITE_BYPASS_TOKEN)
 const headers = {
   Authorization: `Bearer ${process.env.TITLE_INGEST_TOKEN}`,
   'OAI-Sites-Authorization': `Bearer ${process.env.SITE_BYPASS_TOKEN}`,
+  'X-Collector-Context': executionContext,
 };
+const preparation = await fetch(endpoint, {
+  method: 'POST',
+  headers: { ...headers, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ action: 'prepare', executionContext }),
+  redirect: 'manual',
+  signal: AbortSignal.timeout(20000),
+});
+if (!preparation.ok)
+  throw new Error(`Arctic preparation HTTP ${preparation.status}`);
+console.log(JSON.stringify(await preparation.json()));
 const stateResponse = await fetch(endpoint, {
   headers,
   redirect: 'manual',
@@ -40,7 +55,9 @@ if (!state.needed) {
 }
 let payload: object;
 try {
-  const paced = createArcticFetcher();
+  const paced = createArcticFetcher(
+    process.env.ARCTIC_DIAGNOSTICS === '1' ? diagnosticArcticFetcher() : fetch,
+  );
   const result = await fetchIndexedCandidates(
     {
       REDDIT_SUBREDDITS: state.subreddits.join(','),
@@ -53,6 +70,7 @@ try {
   const trackedRaw = await refreshIndexedPosts(state.trackedIds, paced);
   payload = {
     scheduledAtMs: state.scheduledAtMs,
+    executionContext,
     snapshot: {
       candidates: result.candidates.map((p) => ({
         ...p,
@@ -73,8 +91,18 @@ try {
     },
   };
 } catch (error) {
+  if (process.env.ARCTIC_DIAGNOSTICS === '1')
+    console.log(
+      JSON.stringify({
+        collectionFailure:
+          error instanceof Error ? error.message : String(error),
+        upstreamStatus:
+          error instanceof RedditRssError ? error.status : undefined,
+      }),
+    );
   payload = {
     scheduledAtMs: state.scheduledAtMs,
+    executionContext,
     failure: {
       status: error instanceof RedditRssError ? error.status : undefined,
       retryAfter:

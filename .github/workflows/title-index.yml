@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '10 * * * *'
   workflow_dispatch:
+    inputs:
+      diagnostics:
+        description: 'Log Arctic 429 responses and run one minimal curl probe'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -21,6 +26,18 @@ jobs:
         env:
           TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
           SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}
+          ARCTIC_DIAGNOSTICS: ${{ inputs.diagnostics && '1' || '0' }}
+      - name: Minimal Arctic curl probe (manual diagnostics only)
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.diagnostics }}
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          sleep 2
+          marker="$(cat /proc/sys/kernel/random/uuid)"
+          echo "::stop-commands::$marker"
+          date -u
+          curl -si 'https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=ETFs&limit=1'
+          echo "::$marker::"
       - name: Read public RSS once and store private title index
         if: ${{ !cancelled() }}
         run: node scripts/collect-title-index.mjs

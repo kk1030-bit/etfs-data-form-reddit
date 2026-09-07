@@ -98,6 +98,8 @@ export const redditSourceState = sqliteTable('reddit_source_state', {
   lastError: text('last_error'),
   leaseToken: text('lease_token'),
   leaseUntilUtc: text('lease_until_utc'),
+  executionContext: text('execution_context'),
+  cooldownOrigin: text('cooldown_origin'),
 });
 
 export const hourlyRankings = sqliteTable(

@@ -34,7 +34,15 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 
 贴文只请求已公开支持的字段 id,title,created_utc,author,url,num_comments,over_18,subreddit,selftext,retrieved_on；后三个用于现有筛选、译文和索引时间。留言仅请求 id,link_id,created_utc,subreddit，不读取 body。aggregate 不支持按 link_id 分组，因此保留留言样本计数，绝不使用刚归档的 score/num_comments 排名。User-Agent 包含本项目 GitHub 地址。
 
-已有冷却期限若未保存原始重置标头，无法可靠地倒推缩短；不会为了迁移执行环境擅自清空它。新响应使用标头优先策略。GitHub 排程是每小时 :10，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
+Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runner 标签与 GITHUB_SHA，Worker 使用构建时的 Git SHA。同一版本重跑不会重置；环境或版本变化时连续限流计数归零，并清除本程序计算的 fallback 冷却。有效服务器重置期限仍保留；无法识别来源的旧期限也不会自动清除。GitHub 排程是每小时 :10，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
+
+## 手动诊断
+
+仅在操作者明确要求时，用 JOB_SECRET 验证的 DELETE /api/internal/arctic-index 清除 Arctic Shift 的冷却期限、退避计数与当前错误；不删除帖子、历史榜单、报告或其他来源状态，也不抢占有效采集锁。旧的同小时作业重试期限不会阻止已重置来源再次入库，但已完成或正在执行的作业不会重跑。
+
+随后用 workflow_dispatch 将 diagnostics 设为 true，采集器会记录实际 429 的状态码/原因、Fetch 可见的所有响应标头，以及 body 前 500 个 Unicode 字符，并标明空 body。Fetch 不暴露 HTTP 协议版本；同一次 workflow 还会执行原样 curl -si 简单查询，打印协议状态行和原始响应。诊断日志仅输出 Arctic Shift 响应，不输出网站凭据，且禁用响应内容中的 Actions 控制指令。定时任务默认不执行额外 curl 探测。
+
+本机对照命令：curl -si 'https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=ETFs&limit=1'（Windows 使用 curl.exe）。记录两侧时间、状态、标头与内容类型；本机 200 / runner 429 是出口环境差异的证据，不单凭一次结果断言永久 IP 网段封锁。
 
 [Crawl4AI](https://github.com/unclecode/crawl4ai) 的 Python/Chromium 没有直接嵌入普通 Worker；项目按本场景将受控来源、清洗、去重与结构化抽取重写为 Workers 兼容 TypeScript。
 

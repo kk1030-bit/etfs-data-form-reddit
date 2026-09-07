@@ -11,7 +11,64 @@ export type RssSourceState = {
   last_error: string | null;
   lease_token: string | null;
   lease_until_utc: string | null;
+  execution_context?: string | null;
+  cooldown_origin?: string | null;
 };
+
+declare const __COLLECTOR_BUILD_SHA__: string;
+export function workerArcticContext(): string {
+  return `cloudflare-worker:${typeof __COLLECTOR_BUILD_SHA__ === 'undefined' ? 'local-development' : __COLLECTOR_BUILD_SHA__}`;
+}
+
+export async function prepareArcticContext(
+  db: D1Database,
+  context: string,
+  nowMs = Date.now(),
+): Promise<RssSourceState> {
+  const at = new Date(nowMs).toISOString();
+  await db.batch([
+    db
+      .prepare(`INSERT INTO reddit_source_state (source, execution_context)
+      VALUES ('arctic-shift', ?1) ON CONFLICT(source) DO NOTHING`)
+      .bind(context),
+    db
+      .prepare(`UPDATE reddit_source_state SET execution_context = ?1, consecutive_429 = 0,
+      cooldown_until_utc = CASE WHEN cooldown_origin = 'fallback' THEN NULL ELSE cooldown_until_utc END,
+      cooldown_origin = CASE WHEN cooldown_origin = 'fallback' THEN NULL ELSE cooldown_origin END
+      WHERE source = 'arctic-shift' AND execution_context IS NOT ?1
+      AND (lease_until_utc IS NULL OR lease_until_utc <= ?2)`)
+      .bind(context, at),
+  ]);
+  const state = (await readRssSourceState(db, 'arctic-shift'))!;
+  if (state.execution_context !== context)
+    throw new RssDeferredError(
+      state.lease_until_utc ?? at,
+      'in_flight',
+      'arctic-shift',
+    );
+  return state;
+}
+
+// Explicit operator action only. Keep attempt history, posts and other sources.
+export async function resetArcticCooldown(db: D1Database, nowMs = Date.now()) {
+  const before = await readRssSourceState(db, 'arctic-shift');
+  const at = new Date(nowMs).toISOString();
+  if (before?.lease_until_utc && before.lease_until_utc > at)
+    throw new RssDeferredError(
+      before.lease_until_utc,
+      'in_flight',
+      'arctic-shift',
+    );
+  const result = await db
+    .prepare(`UPDATE reddit_source_state SET consecutive_429 = 0,
+    cooldown_until_utc = NULL, cooldown_origin = NULL, last_error = NULL
+    WHERE source = 'arctic-shift' AND (lease_until_utc IS NULL OR lease_until_utc <= ?1)`)
+    .bind(at)
+    .run();
+  if (before && !Number(result.meta.changes))
+    throw new RssDeferredError(at, 'in_flight', 'arctic-shift');
+  return { before, after: await readRssSourceState(db, 'arctic-shift') };
+}
 
 export class RssDeferredError extends Error {
   readonly retryAtUtc: string;
@@ -32,14 +89,10 @@ export class RssDeferredError extends Error {
   }
 }
 
-export function cooldownDeadline(
+function serverCooldownMs(
   nowMs: number,
-  consecutive429: number,
   retryAfter?: string,
-  preferServer = false,
-): string {
-  const exponent = Math.min(5, Math.max(0, consecutive429 - 1));
-  const backoffMs = Math.min(24, 2 ** exponent) * HOUR_MS;
+): number | undefined {
   const value = retryAfter?.trim();
   let requestedMs = Number.NaN;
   if (value && /^\d+(?:\.\d+)?$/.test(value)) {
@@ -49,11 +102,25 @@ export function cooldownDeadline(
   }
   // Invalid/overflowing headers must not break the job. A valid server deadline
   // longer than our own 24-hour maximum is still respected.
-  const serverMs =
-    Number.isFinite(requestedMs) && requestedMs <= 8.64e15 ? requestedMs : 0;
-  if (preferServer && Number.isFinite(requestedMs) && serverMs >= nowMs)
+  return Number.isFinite(requestedMs) &&
+    requestedMs >= nowMs &&
+    requestedMs <= 8.64e15
+    ? requestedMs
+    : undefined;
+}
+
+export function cooldownDeadline(
+  nowMs: number,
+  consecutive429: number,
+  retryAfter?: string,
+  preferServer = false,
+): string {
+  const exponent = Math.min(5, Math.max(0, consecutive429 - 1));
+  const backoffMs = Math.min(24, 2 ** exponent) * HOUR_MS;
+  const serverMs = serverCooldownMs(nowMs, retryAfter);
+  if (preferServer && serverMs !== undefined)
     return new Date(serverMs).toISOString();
-  return new Date(Math.max(nowMs + backoffMs, serverMs)).toISOString();
+  return new Date(Math.max(nowMs + backoffMs, serverMs ?? 0)).toISOString();
 }
 
 export function nextHourlyCheck(
@@ -124,6 +191,7 @@ export async function withRssCooldown<T>(
   collect: () => Promise<T>,
   now: () => number = Date.now,
   source = 'reddit-rss',
+  expectedContext?: string,
 ): Promise<T> {
   const initial = await readRssSourceState(db, source);
   await db
@@ -147,13 +215,15 @@ export async function withRssCooldown<T>(
     .prepare(
       `UPDATE reddit_source_state SET lease_token = ?1, lease_until_utc = ?2, last_attempt_at_utc = ?3
      WHERE source = ?4 AND (cooldown_until_utc IS NULL OR cooldown_until_utc <= ?3)
-       AND (lease_until_utc IS NULL OR lease_until_utc <= ?3)`,
+       AND (lease_until_utc IS NULL OR lease_until_utc <= ?3)
+       AND (?5 IS NULL OR execution_context = ?5)`,
     )
     .bind(
       token,
       new Date(nowMs + LEASE_MS).toISOString(),
       new Date(nowMs).toISOString(),
       source,
+      expectedContext ?? null,
     )
     .run();
   const state = await readRssSourceState(db, source);
@@ -172,7 +242,7 @@ export async function withRssCooldown<T>(
     await db
       .prepare(
         `UPDATE reddit_source_state SET consecutive_429 = 0, cooldown_until_utc = NULL,
-         last_error = NULL, lease_token = NULL, lease_until_utc = NULL
+         last_error = NULL, lease_token = NULL, lease_until_utc = NULL, cooldown_origin = NULL
        WHERE source = ?1 AND lease_token = ?2`,
       )
       .bind(source, token)
@@ -185,19 +255,32 @@ export async function withRssCooldown<T>(
         (error.status === 503 && Boolean(error.retryAfter)))
     ) {
       const count = Number(state?.consecutive_429 ?? 0) + 1;
+      const failedAt = now();
       const deadline = cooldownDeadline(
-        now(),
+        failedAt,
         count,
         error.retryAfter,
         source === 'arctic-shift',
       );
+      const origin =
+        source === 'arctic-shift' &&
+        serverCooldownMs(failedAt, error.retryAfter) !== undefined
+          ? 'server'
+          : 'fallback';
       await db
         .prepare(
           `UPDATE reddit_source_state SET consecutive_429 = ?1, cooldown_until_utc = ?2,
-           last_error = ?3, lease_token = NULL, lease_until_utc = NULL
+           last_error = ?3, lease_token = NULL, lease_until_utc = NULL, cooldown_origin = ?6
          WHERE source = ?4 AND lease_token = ?5`,
         )
-        .bind(count, deadline, error.message.slice(0, 2_000), source, token)
+        .bind(
+          count,
+          deadline,
+          error.message.slice(0, 2_000),
+          source,
+          token,
+          origin,
+        )
         .run();
       throw new RssDeferredError(deadline, 'rate_limited', source);
     }
