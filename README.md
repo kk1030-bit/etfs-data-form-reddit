@@ -1,6 +1,8 @@
 # etfs热门话题
 
-面向 Cloudflare 的私有 Reddit ETF 讨论观察站。当前生产来源是 **Arctic Shift 公开 Reddit 索引**，不是被限流的 Reddit RSS，不需要 Reddit OAuth 审批。
+面向 Cloudflare 的公开 Reddit ETF 讨论观察站。当前生产来源是 **Arctic Shift 公开 Reddit 索引**，不是被限流的 Reddit RSS，不需要 Reddit OAuth 审批。
+
+网站：[etfs热门话题](https://etfs-hot-topics.wangguancc.chatgpt.site/)。访客无需登录即可阅读；网站公开权限由 Sites 托管访问策略管理，不写入 hosting.json。作业与采集导入端点仍分别要求 JOB_SECRET 或 TITLE_INGEST_TOKEN，密钥不会随网站公开。现有禁止搜索引擎索引的设置保持不变。
 
 ## 当前行为
 
@@ -22,7 +24,7 @@
 
 Arctic Shift 是第三方索引，不是 Reddit 官方实时接口。部分新帖收录很快，但没有实时性或长期可用性保证，互动总数可能延迟。网站显示**已索引留言样本数**，不称为完整评论数、浏览量或真实流量；作者观察不代表认证 KOL。失败或覆盖不完整时显示状态与上次成功时间。
 
-RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷切换地址密集重试。公共索引不代表获得再发布许可；网站保持私有。
+RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷切换地址密集重试。公共索引不代表获得再发布许可；网站公开不改变原有短节录范围、保留期限与来源标注。
 
 ## 架构
 
@@ -61,7 +63,7 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 | WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                           |
 | OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                          |
 | JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                   |
-| SITE_BYPASS_TOKEN                            | Cron 与 GitHub Actions，通过私有 Sites 门槛       |
+| SITE_BYPASS_TOKEN                            | 保留现有 Cron 与 Actions 的 Sites 调用凭据；不替代作业/导入密钥 |
 | TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的既有采集提交密钥           |
 | ARCTIC_SHIFT_EXTERNAL                        | 生产为 1；Arctic Shift 仅由 GitHub Actions 请求   |
 | TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                |
