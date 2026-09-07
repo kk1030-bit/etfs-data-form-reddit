@@ -36,6 +36,7 @@ export function cooldownDeadline(
   nowMs: number,
   consecutive429: number,
   retryAfter?: string,
+  preferServer = false,
 ): string {
   const exponent = Math.min(5, Math.max(0, consecutive429 - 1));
   const backoffMs = Math.min(24, 2 ** exponent) * HOUR_MS;
@@ -50,14 +51,22 @@ export function cooldownDeadline(
   // longer than our own 24-hour maximum is still respected.
   const serverMs =
     Number.isFinite(requestedMs) && requestedMs <= 8.64e15 ? requestedMs : 0;
+  if (preferServer && Number.isFinite(requestedMs) && serverMs >= nowMs)
+    return new Date(serverMs).toISOString();
   return new Date(Math.max(nowMs + backoffMs, serverMs)).toISOString();
 }
 
-export function nextHourlyCheck(deadline: string | null): string | null {
+export function nextHourlyCheck(
+  deadline: string | null,
+  minuteOffset = 0,
+): string | null {
   if (!deadline) return null;
   const ms = Date.parse(deadline);
   return Number.isFinite(ms)
-    ? new Date(Math.ceil(ms / HOUR_MS) * HOUR_MS).toISOString()
+    ? new Date(
+        Math.ceil((ms - minuteOffset * 60000) / HOUR_MS) * HOUR_MS +
+          minuteOffset * 60000,
+      ).toISOString()
     : null;
 }
 
@@ -176,7 +185,12 @@ export async function withRssCooldown<T>(
         (error.status === 503 && Boolean(error.retryAfter)))
     ) {
       const count = Number(state?.consecutive_429 ?? 0) + 1;
-      const deadline = cooldownDeadline(now(), count, error.retryAfter);
+      const deadline = cooldownDeadline(
+        now(),
+        count,
+        error.retryAfter,
+        source === 'arctic-shift',
+      );
       await db
         .prepare(
           `UPDATE reddit_source_state SET consecutive_429 = ?1, cooldown_until_utc = ?2,

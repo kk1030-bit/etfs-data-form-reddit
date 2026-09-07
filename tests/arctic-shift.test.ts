@@ -4,6 +4,10 @@ import {
   fetchIndexedCandidates,
   normalizeIndexedPost,
   refreshIndexedPosts,
+  arcticRetryAfter,
+  createArcticFetcher,
+  ARCTIC_POST_FIELDS,
+  ARCTIC_COMMENT_FIELDS,
 } from '../lib/collector/arctic-shift.ts';
 import { scoreCandidates, logicalHourIso } from '../lib/collector/core.ts';
 import { runHourly, runDaily, runWeekly } from '../lib/collector/jobs.ts';
@@ -18,6 +22,11 @@ import {
 } from '../lib/collector/rss-cooldown.ts';
 import { RedditRssError } from '../lib/collector/reddit-rss.ts';
 import { testDb } from './d1-test-db.ts';
+import { parseArcticSnapshot } from '../lib/collector/arctic-snapshot.ts';
+import {
+  cooldownDeadline,
+  nextHourlyCheck,
+} from '../lib/collector/rss-cooldown.ts';
 
 const now = Date.now();
 const post = (id = 'abc123', extra: Record<string, unknown> = {}) => ({
@@ -35,6 +44,214 @@ const post = (id = 'abc123', extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const response = (data: unknown[]) => Response.json({ data });
+
+void test('GitHub collector script transports cleaned tracking text and only projected queries (mocked network)', async (t) => {
+  const original = globalThis.fetch;
+  const previousIngest = process.env.TITLE_INGEST_TOKEN;
+  const previousBypass = process.env.SITE_BYPASS_TOKEN;
+  t.after(() => {
+    globalThis.fetch = original;
+    if (previousIngest === undefined) delete process.env.TITLE_INGEST_TOKEN;
+    else process.env.TITLE_INGEST_TOKEN = previousIngest;
+    if (previousBypass === undefined) delete process.env.SITE_BYPASS_TOKEN;
+    else process.env.SITE_BYPASS_TOKEN = previousBypass;
+  });
+  process.env.TITLE_INGEST_TOKEN = 'test-only';
+  process.env.SITE_BYPASS_TOKEN = 'test-only';
+  let uploaded = false;
+  const raw = post('abc123', {
+    title: 'A question',
+    selftext: ' '.repeat(4100) + 'ETF investing strategy',
+  });
+  delete (raw as Record<string, unknown>).permalink;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (url.hostname === 'etfs-hot-topics.wangguancc.chatgpt.site') {
+      if (init?.method !== 'POST')
+        return Response.json({
+          needed: true,
+          scheduledAtMs: now,
+          subreddits: ['ETFs'],
+          keywords: ['etf'],
+          trackedIds: ['t3_abc123'],
+        });
+      assert.equal(typeof init.body, 'string');
+      const submitted = JSON.parse(init.body as string);
+      const snapshot = parseArcticSnapshot(
+        submitted.snapshot,
+        { REDDIT_SUBREDDITS: 'ETFs' },
+        now,
+      );
+      assert.equal(
+        snapshot.trackedRaw[0].data?.selftext,
+        'ETF investing strategy',
+      );
+      assert.ok(normalizeIndexedPost(snapshot.trackedRaw[0].data!));
+      assert.equal(snapshot.candidates.length, 1);
+      uploaded = true;
+      return Response.json({ status: 'completed', selected: 1, candidates: 1 });
+    }
+    assert.equal(url.origin, 'https://arctic-shift.photon-reddit.com');
+    for (const key of ['title', 'query', 'selftext', 'body'])
+      assert.equal(url.searchParams.has(key), false);
+    return response(url.pathname === '/api/comments/search' ? [] : [raw]);
+  };
+  await import(
+    new URL('../scripts/collect-arctic-index.ts', import.meta.url).href
+  );
+  assert.equal(uploaded, true);
+});
+
+void test('Arctic headers override long fallback; reset supports seconds, epoch timestamps and invalid headers', () => {
+  const reset = (values: Record<string, string>) =>
+    arcticRetryAfter(new Headers(values), now);
+  assert.equal(
+    reset({ 'X-RateLimit-Reset': '30', 'Retry-After': '3600' }),
+    '30',
+  );
+  assert.equal(reset({ 'X-RateLimit-Reset-At': String(now + 45000) }), '45');
+  const epoch = Math.ceil(now / 1000) + 45;
+  assert.equal(
+    reset({ 'X-RateLimit-Reset-At': String(epoch) }),
+    String(Math.ceil((epoch * 1000 - now) / 1000)),
+  );
+  assert.equal(
+    reset({
+      'X-RateLimit-Reset': 'invalid',
+      'X-RateLimit-Reset-At': new Date(now + 60000).toISOString(),
+    }),
+    '60',
+  );
+  assert.equal(
+    reset({ 'X-RateLimit-Reset': '-1', 'X-RateLimit-Reset-At': 'nonsense' }),
+    undefined,
+  );
+  assert.equal(
+    cooldownDeadline(now, 6, '30', true),
+    new Date(now + 30000).toISOString(),
+  );
+  assert.equal(
+    cooldownDeadline(now, 2, undefined, true),
+    new Date(now + 7200000).toISOString(),
+  );
+  assert.equal(
+    nextHourlyCheck('2026-09-07T03:10:01Z', 10),
+    '2026-09-07T04:10:00.000Z',
+  );
+});
+
+void test('Arctic pacing spaces requests by two seconds and stops at exhausted Remaining', async () => {
+  let clock = now;
+  let calls = 0;
+  const waits: number[] = [];
+  const paced = createArcticFetcher(
+    async () => {
+      calls++;
+      return new Response('{}', {
+        headers: {
+          'X-RateLimit-Remaining': calls === 1 ? '0.2' : '0',
+          'X-RateLimit-Reset': '40',
+        },
+      });
+    },
+    async (ms) => {
+      waits.push(ms);
+      clock += ms;
+    },
+    () => clock,
+  );
+  await paced('https://example.test');
+  await paced('https://example.test');
+  await assert.rejects(
+    () => paced('https://example.test'),
+    (error: unknown) =>
+      error instanceof RedditRssError &&
+      error.status === 429 &&
+      error.retryAfter === '40',
+  );
+  assert.deepEqual(waits, [2000]);
+  assert.equal(calls, 2);
+});
+
+void test('projected Arctic posts get a canonical permalink without relying on unavailable fields', () => {
+  const projected = post();
+  delete (projected as Record<string, unknown>).permalink;
+  assert.equal(
+    normalizeIndexedPost(projected)?.permalink,
+    'https://www.reddit.com/r/ETFs/comments/abc123/',
+  );
+  assert.equal(
+    normalizeIndexedPost({ ...projected, subreddit: '../bad' }),
+    null,
+  );
+});
+
+void test('external Arctic ingestion ranks without fetching Arctic from Cloudflare and preserves header cooldown', async (t) => {
+  const fixture = testDb();
+  t.after(fixture.close);
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  globalThis.fetch = async () => {
+    throw new Error('Unexpected network fetch');
+  };
+  const env = {
+    DB: fixture.db,
+    REDDIT_SOURCE_MODE: 'arctic_shift',
+    REDDIT_SUBREDDITS: 'ETFs',
+    ARCTIC_SHIFT_EXTERNAL: '1',
+    TITLE_INDEX_EXTERNAL: '1',
+  };
+  assert.equal((await runHourly(env, now)).status, 'skipped');
+  const snapshot = parseArcticSnapshot(
+    {
+      candidates: [normalizeIndexedPost(post())],
+      trackedRaw: [],
+      commentCounts: [['t3_abc123', 3]],
+      details: { communities: ['ETFs'], warnings: [] },
+    },
+    env,
+    now,
+  );
+  assert.equal(snapshot.candidates[0].score, 0);
+  assert.equal(snapshot.candidates[0].comments, 0);
+  assert.equal((await runHourly(env, now, { snapshot })).selected, 1);
+  const next = now + 3600000;
+  const failed = await runHourly(env, next, {
+    failure: { status: 429, retryAfter: '30' },
+  });
+  assert.equal(failed.status, 'cooldown');
+  assert.ok(Date.parse(failed.retryAtUtc!) - Date.now() <= 31000);
+  assert.equal(
+    fixture.sqlite.prepare('SELECT COUNT(*) AS n FROM hourly_rankings').get()
+      ?.n,
+    1,
+  );
+  assert.throws(
+    () =>
+      parseArcticSnapshot(
+        { ...snapshot, commentCounts: [['bad', 3]] },
+        env,
+        now,
+      ),
+    /Invalid comment/,
+  );
+  assert.throws(
+    () =>
+      parseArcticSnapshot(
+        {
+          ...snapshot,
+          candidates: [
+            { ...snapshot.candidates[0], permalink: 'https://evil.test/' },
+          ],
+        },
+        env,
+        now,
+      ),
+    /Invalid/,
+  );
+});
 
 void test('translation never invents a currency absent from the source', () => {
   assert.equal(
@@ -163,6 +380,18 @@ void test('archive discovery counts deduplicated comment samples including still
       assert.equal(init?.redirect, 'manual');
       const url = new URL(input instanceof Request ? input.url : input);
       assert.equal(url.origin, 'https://arctic-shift.photon-reddit.com');
+      for (const key of ['title', 'query', 'selftext', 'body'])
+        assert.equal(url.searchParams.has(key), false);
+      assert.match(
+        String(new Headers(init?.headers).get('User-Agent')),
+        /github.com\/kk1030-bit\/etfs-data-form-reddit/,
+      );
+      assert.equal(
+        url.searchParams.get('fields'),
+        url.pathname === '/api/posts/search'
+          ? ARCTIC_POST_FIELDS
+          : ARCTIC_COMMENT_FIELDS,
+      );
       if (url.pathname === '/api/posts/search')
         return response([
           post(),

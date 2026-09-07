@@ -389,7 +389,14 @@ export async function getDashboardData(): Promise<DashboardData> {
       checkedAt: window.end,
       latestAttempt,
       cooldownUntil,
-      nextRetryAt: nextHourlyCheck(cooldownUntil),
+      nextRetryAt: nextHourlyCheck(
+        cooldownUntil,
+        mode === 'arctic-shift' &&
+          (env as unknown as { ARCTIC_SHIFT_EXTERNAL?: string })
+            .ARCTIC_SHIFT_EXTERNAL === '1'
+          ? 10
+          : 0,
+      ),
       sourceLastAttemptAt: rssState?.last_attempt_at_utc ?? null,
       statusError: null,
       aiConfigured: hasLlmProvider(env as unknown as LlmEnv),

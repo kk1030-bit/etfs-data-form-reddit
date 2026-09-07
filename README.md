@@ -6,13 +6,14 @@
 
 - 每小时查询六个社区最近 24 小时帖子：ETFs、investing、Bogleheads、stocks、StockMarket、dividends。
 - 每个社区最多 100 篇帖子与 100 条近期留言元数据。只汇总按帖子分组的讨论样本数，不保存留言正文和留言者身份。
-- ETF 过滤、原帖链接规范化、去重，排除删除、成人及不可索引内容；不跟随站外文章链接。
+- ETF 关键词仅在本地过滤，原帖链接由有效 ID 与社区名规范化；排除来源可识别的删除和成人内容，不跟随站外文章链接。字段投影不提供全部删除/不可索引元数据，不能保证检测所有删除状态。
 - 前五篇按讨论样本 50%、ETF 相关性 25%、新鲜度 20%、本采集器作者活跃度 5% 排序。样本为零时不虚构讨论热度。
 - 每篇入榜帖跟踪最多 24 小时；每小时最多 5 个席位，滚动 24 小时最多 120 个席位。同一帖子可以多次入榜，席位不等于不同文章数。
 - Workers AI 生成简体中文标题、短节录译文、摘要与重点。最多翻译 1,000 个输入字符，**不是全文翻译**；内容未变时复用已有译文。
 - 每日北京时间 00:00 汇总刚结束的自然日；每周一 00:10 汇总前一个完整周一至周日。显示实际覆盖程度，不补造缺失小时。
 - 页面可见时每分钟刷新状态，恢复联网时刷新；页面刷新不会触发来源请求。
-- 每个来源独立持久锁与冷却。429 按 1、2、4、8、16、24 小时退避，并遵守更长的服务器等待时间；追踪刷新也在同一锁内。
+- Arctic Shift 的 429 优先按有效 X-RateLimit-Reset（秒）或 X-RateLimit-Reset-At（绝对时间）等待，兼容 Retry-After；只有没有有效标头才按 1、2、4、8、16、24 小时退避。原 Reddit RSS/Google 的策略不变。
+- Arctic Shift 所有请求序列执行，响应后至少间隔 2 秒；X-RateLimit-Remaining 耗尽就停止本轮，不把它解释为保证可用的请求次数。不发送 title/query/selftext/body 关键词搜索参数。
 - 原始短节录、链接与作者标识最多保留 48 小时，长期仅留去标识化聚合报告。已确认删除的帖子不会被旧索引复活。
 
 ## 数据真实性与限制
@@ -27,7 +28,11 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 
 标题备援由本仓库的 GitHub Actions 标准 Ubuntu runner 每小时第 10 分钟读取一次公开 RSS，再经独立密钥送入 Cloudflare。公开仓库使用标准免费 runner；GitHub 排程可能延迟。网站、D1 和翻译仍在 Cloudflare，不依赖本地电脑。密钥仅保存在 Actions secrets 与 Sites 服务端环境。
 
-Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Worker 请求 Arctic Shift、写入 D1，并通过独立密钥访问 Cron Worker 的固定模型 AI 接口。网站和 D1 由 .openai/hosting.json 管理。部署运行不依赖本地电脑、磁盘、浏览器或常驻 Python。
+同一 GitHub Actions 管线也负责 Arctic Shift 采集与追踪刷新，经既有 TITLE_INGEST_TOKEN 提交到网站 /api/internal/arctic-index。ARCTIC_SHIFT_EXTERNAL=1 时，Cloudflare 小时任务不会直接请求 Arctic Shift；Cloudflare 仍负责验证、排名、D1、翻译及原有日报/周报。网站和 D1 由 .openai/hosting.json 管理，不依赖本地电脑。
+
+贴文只请求已公开支持的字段 id,title,created_utc,author,url,num_comments,over_18,subreddit,selftext,retrieved_on；后三个用于现有筛选、译文和索引时间。留言仅请求 id,link_id,created_utc,subreddit，不读取 body。aggregate 不支持按 link_id 分组，因此保留留言样本计数，绝不使用刚归档的 score/num_comments 排名。User-Agent 包含本项目 GitHub 地址。
+
+已有冷却期限若未保存原始重置标头，无法可靠地倒推缩短；不会为了迁移执行环境擅自清空它。新响应使用标头优先策略。GitHub 排程是每小时 :10，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
 
 [Crawl4AI](https://github.com/unclecode/crawl4ai) 的 Python/Chromium 没有直接嵌入普通 Worker；项目按本场景将受控来源、清洗、去重与结构化抽取重写为 Workers 兼容 TypeScript。
 
@@ -57,7 +62,8 @@ Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Wo
 | OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                          |
 | JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                   |
 | SITE_BYPASS_TOKEN                            | Cron 与 GitHub Actions，通过私有 Sites 门槛       |
-| TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的独立标题提交密钥           |
+| TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的既有采集提交密钥           |
+| ARCTIC_SHIFT_EXTERNAL                        | 生产为 1；Arctic Shift 仅由 GitHub Actions 请求   |
 | TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                |
 | RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                    |
 | NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                             |
@@ -67,11 +73,11 @@ Cloudflare Cron Worker 调用网站的小时、日报和周报任务；网站 Wo
 
 ## 排程
 
-| Cron（UTC）   | 北京时间     | 作业            |
-| ------------- | ------------ | --------------- |
-| 0 * * * *     | 每小时整点   | 前五篇与追踪    |
-| 0 16 * * *    | 每日 00:00   | 日报            |
-| 10 16 * * SUN | 每周一 00:10 | 周报            |
-| 10 * * * *    | 每小时 :10   | GitHub 标题备援 |
+| Cron（UTC）   | 北京时间     | 作业                                     |
+| ------------- | ------------ | ---------------------------------------- |
+| 0 * * * *     | 每小时整点   | Cloudflare 检查；外部模式跳过直连        |
+| 0 16 * * *    | 每日 00:00   | 日报                                     |
+| 10 16 * * SUN | 每周一 00:10 | 周报                                     |
+| 10 * * * *    | 每小时 :10   | GitHub 标题备援、Arctic Shift 采集与追踪 |
 
 参考：[Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)、[索引字段说明](https://github.com/ArthurHeitmann/arctic_shift/blob/master/file_content_explanations.md)、[Workers AI 免费额度](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。

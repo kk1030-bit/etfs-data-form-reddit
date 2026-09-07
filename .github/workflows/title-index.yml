@@ -1,4 +1,4 @@
-name: Reddit title index fallback
+name: Reddit hourly collector
 on:
   schedule:
     - cron: '10 * * * *'
@@ -11,12 +11,18 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, pinned
         with:
           persist-credentials: false
+      - name: Read Arctic Shift serially and ingest into Cloudflare
+        run: node --experimental-strip-types scripts/collect-arctic-index.ts
+        env:
+          TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
+          SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}
       - name: Read public RSS once and store private title index
+        if: ${{ !cancelled() }}
         run: node scripts/collect-title-index.mjs
         env:
           TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}

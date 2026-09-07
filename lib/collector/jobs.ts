@@ -41,12 +41,14 @@ import {
 import { collectTitleFallback } from './title-fallback.ts';
 import type { RunStage } from './collection-status.ts';
 import { normalizeIndexedPost } from './arctic-shift.ts';
+import type { ArcticSnapshot } from './arctic-snapshot.ts';
 
 export type CollectorEnv = RedditEnv &
   LlmEnv & {
     DB: D1Database;
     JOB_SECRET?: string;
     RAW_CONTENT_RETENTION_HOURS?: string;
+    ARCTIC_SHIFT_EXTERNAL?: string;
   };
 
 type JobKind = 'hourly' | 'daily' | 'weekly';
@@ -661,9 +663,26 @@ async function refreshAuthorMetrics(
 export async function runHourly(
   env: CollectorEnv,
   scheduledAtMs: number,
+  externalArctic?: {
+    snapshot?: ArcticSnapshot;
+    failure?: { status?: number; retryAfter?: string };
+  },
 ): Promise<JobResult> {
   const logicalHour = logicalHourIso(scheduledAtMs);
   const sourceMode = redditSourceMode(env);
+  if (
+    sourceMode === 'arctic-shift' &&
+    env.ARCTIC_SHIFT_EXTERNAL === '1' &&
+    !externalArctic
+  ) {
+    return {
+      status: 'skipped',
+      kind: 'hourly',
+      logicalTimeUtc: logicalHour,
+      sourceMode,
+      reason: 'github_actions_collector',
+    };
+  }
   const retentionHours = clampRawRetentionHours(
     env.RAW_CONTENT_RETENTION_HOURS,
   );
@@ -714,6 +733,25 @@ export async function runHourly(
       loadPreviousState(env.DB, logicalHour),
     ]);
     const collect = async () => {
+      if (externalArctic) {
+        if (externalArctic.failure)
+          throw new RedditRssError(
+            'Arctic Shift external request failed',
+            externalArctic.failure.status,
+            externalArctic.failure.retryAfter,
+          );
+        const snapshot = externalArctic.snapshot;
+        if (!snapshot) throw new Error('Arctic snapshot required');
+        session.sourceDetails = snapshot.details;
+        session.commentCounts = new Map(snapshot.commentCounts);
+        const trackedIds = new Set(trackers.map((t) => t.postId));
+        return {
+          discovered: snapshot.candidates,
+          trackedRaw: snapshot.trackedRaw.filter((row) =>
+            trackedIds.has(`t3_${String(row.data?.id).toLowerCase()}`),
+          ),
+        };
+      }
       const discovered = await discoverRedditCandidates(env, session);
       const trackedRaw =
         session.mode !== 'rss-preview' && trackers.length
