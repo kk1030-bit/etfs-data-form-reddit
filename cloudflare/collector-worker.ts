@@ -1,4 +1,4 @@
-import { inspectSiteJobResponse } from './cron-result';
+import { inspectSiteJobResponse } from './cron-result.ts';
 
 type CronEnv = {
   SITE_BASE_URL: string;
@@ -58,15 +58,21 @@ export default {
         request.headers.get('authorization') !== `Bearer ${env.AI_RELAY_SECRET}`
       )
         return json({ error: 'Unauthorized' }, 401);
-      if (Number(request.headers.get('content-length')) > 8000)
+      if (Number(request.headers.get('content-length')) > 96000)
         return json({ error: 'Input too large' }, 413);
       try {
         const raw = await request.text();
-        if (new TextEncoder().encode(raw).length > 8000)
+        if (new TextEncoder().encode(raw).length > 96000)
           return json({ error: 'Input too large' }, 413);
         const input = JSON.parse(raw) as {
+          purpose?: string;
           messages?: Array<{ role?: string; content?: string }>;
         };
+        if (input.purpose !== undefined && input.purpose !== 'deep_analysis')
+          return json({ error: 'Invalid purpose' }, 400);
+        const deep = input.purpose === 'deep_analysis';
+        if (!deep && new TextEncoder().encode(raw).length > 8000)
+          return json({ error: 'Input too large' }, 413);
         if (
           !Array.isArray(input.messages) ||
           input.messages.length !== 2 ||
@@ -78,7 +84,7 @@ export default {
         if (
           new TextEncoder().encode(
             input.messages.map((m) => m.content).join(''),
-          ).length > 6000
+          ).length > (deep ? 18000 : 6000)
         )
           return json({ error: 'Input exceeds free-budget limit' }, 413);
         const result = await env.AI.run('@cf/qwen/qwen3-30b-a3b-fp8', {
@@ -86,7 +92,7 @@ export default {
             role: 'system' | 'user';
             content: string;
           }>,
-          max_tokens: 1000,
+          max_tokens: deep ? 1500 : 1000,
           temperature: 0.1,
         });
         return json(result);

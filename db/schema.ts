@@ -257,3 +257,56 @@ export const schedulerChecks = sqliteTable(
     ),
   ],
 );
+
+// Deep analysis retains derived cards for seven days, never article/comment bodies.
+export const deepAnalysisArticles = sqliteTable(
+  'deep_analysis_articles',
+  {
+    id: text('id').primaryKey(),
+    publishedAtUtc: text('published_at_utc').notNull(),
+    firstSeenAtUtc: text('first_seen_at_utc').notNull(),
+    score: real('score').notNull(),
+    cardJson: text('card_json').notNull(),
+  },
+  (t) => [
+    index('idx_deep_articles_published_score').on(t.publishedAtUtc, t.score),
+  ],
+);
+
+export const deepAnalysisSeen = sqliteTable(
+  'deep_analysis_seen',
+  {
+    id: text('id').primaryKey(),
+    seenAtUtc: text('seen_at_utc').notNull(),
+  },
+  (t) => [index('idx_deep_seen_at').on(t.seenAtUtc)],
+);
+
+export const deepAnalysisAuthors = sqliteTable(
+  'deep_analysis_authors',
+  {
+    author: text('author').primaryKey(),
+    longPosts: integer('long_posts').notNull(),
+    checkedAtUtc: text('checked_at_utc').notNull(),
+  },
+  (t) => [index('idx_deep_authors_checked').on(t.checkedAtUtc)],
+);
+
+export const deepAnalysisRuns = sqliteTable(
+  'deep_analysis_runs',
+  {
+    day: text('day').primaryKey(),
+    token: text('token').notNull(),
+    status: text('status').notNull(),
+    startedAtUtc: text('started_at_utc').notNull(),
+    completedAtUtc: text('completed_at_utc'),
+    requests: integer('requests').notNull().default(0),
+    accepted: integer('accepted').notNull().default(0),
+    rejected: integer('rejected').notNull().default(0),
+    failed: integer('failed').notNull().default(0),
+    detailsJson: text('details_json').notNull().default('{}'),
+  },
+  (t) => [
+    check('chk_deep_requests', sql`${t.requests} >= 0 AND ${t.requests} <= 25`),
+  ],
+);

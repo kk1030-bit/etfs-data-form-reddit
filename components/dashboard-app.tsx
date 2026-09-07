@@ -39,6 +39,7 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { LeadTopics } from '@/components/lead-topics';
+import { DeepAnalysisView } from '@/components/deep-analysis-view';
 import { commentMetricLabel, commentGrowthLabel } from '@/lib/comment-metric';
 import {
   Dialog,
@@ -60,9 +61,17 @@ import type {
   DashboardStory,
 } from '@/lib/dashboard-data';
 
-type ViewId = 'top' | 'tracking' | 'daily' | 'weekly' | 'authors' | 'status';
+type ViewId =
+  | 'deep'
+  | 'top'
+  | 'tracking'
+  | 'daily'
+  | 'weekly'
+  | 'authors'
+  | 'status';
 
 const navigation: Array<{ id: ViewId; label: string; icon: typeof Flame }> = [
+  { id: 'deep', label: '深度分析', icon: BookOpenText },
   { id: 'top', label: '最新榜单 Top 5', icon: Flame },
   { id: 'tracking', label: '24 小时追踪', icon: Activity },
   { id: 'daily', label: '历史日报', icon: History },
@@ -283,6 +292,26 @@ function ReportsView({
                 </Badge>
               ))}
             </div>
+            {weekly && report.deepAnalysis?.length ? (
+              <div className="mt-6 space-y-4 border-t border-border pt-5">
+                <h3 className="text-base font-semibold">
+                  本周深度分析 · 评分最高三篇
+                </h3>
+                {report.deepAnalysis.map((article, i) => (
+                  <div key={i} className="space-y-2 text-sm leading-6">
+                    <p>{article.thesis}</p>
+                    {article.keyData.map((line, n) => (
+                      <p key={n} className="text-muted-foreground">
+                        {line}
+                      </p>
+                    ))}
+                    <p className="text-muted-foreground">
+                      反方观点：{article.counterpoints}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <p className="mt-5 text-xs text-muted-foreground">
               {report.analysisStatus === 'aggregate'
                 ? '统计汇总版：AI 未生成扩展摘要，原始统计已正常归档。 '
@@ -298,7 +327,7 @@ function ReportsView({
 
 export function DashboardApp({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [view, setView] = useState<ViewId>('top');
+  const [view, setView] = useState<ViewId>('deep');
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -518,7 +547,13 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   <CircleDot aria-hidden="true" />
                   {view === 'top' ? '最近成功榜单 Top 5' : activeLabel}
                   <span>·</span>
-                  {formatBeijing(data.updatedAt, true)}（北京时间）
+                  {formatBeijing(
+                    view === 'deep'
+                      ? data.deepAnalysis?.updatedAt
+                      : data.updatedAt,
+                    true,
+                  )}
+                  （北京时间）
                   {data.mode === 'demo' ? ' · 演示数据' : ''}
                 </p>
                 <span className="editorial-edition-source">{sourceLabel}</span>
@@ -573,30 +608,42 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                       {activeLabel}
                     </h1>
                     <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                      {view === 'tracking'
-                        ? isIndexed
-                          ? '跟踪每篇入榜帖最多 24 小时；小时榜单可以重复出现同一话题，最多 120 个席位，不等于 120 篇不同文章。'
-                          : isRssPreview
-                            ? '同一帖子跨小时去重，记录最多 24 小时的入榜轨迹；未出现在本轮 RSS 不代表已删除。'
-                            : '同一帖子跨小时去重，保留最多 24 个小时的热度轨迹。'
-                        : view === 'authors'
-                          ? isRssPreview || isIndexed
-                            ? '只统计作者在本采集器中的入榜活跃度，不能据此认定为 KOL。'
-                            : '热门作者是站内互动影响力估算，并非 Reddit 官方认证身份。'
-                          : view === 'status'
-                            ? '查看小时资料是否按时完成、排程检查结果与最近一轮实际采集步骤。'
-                            : '所有统计按北京时间自然日归档，原始时间统一以 UTC 保存。'}
+                      {view === 'deep'
+                        ? '聚焦 ETF、宏观与资产配置的近期长文。先审查内容，再按发布时间由新到旧显示；同一时间按分数排序。'
+                        : view === 'tracking'
+                          ? isIndexed
+                            ? '跟踪每篇入榜帖最多 24 小时；小时榜单可以重复出现同一话题，最多 120 个席位，不等于 120 篇不同文章。'
+                            : isRssPreview
+                              ? '同一帖子跨小时去重，记录最多 24 小时的入榜轨迹；未出现在本轮 RSS 不代表已删除。'
+                              : '同一帖子跨小时去重，保留最多 24 个小时的热度轨迹。'
+                          : view === 'authors'
+                            ? isRssPreview || isIndexed
+                              ? '只统计作者在本采集器中的入榜活跃度，不能据此认定为 KOL。'
+                              : '热门作者是站内互动影响力估算，并非 Reddit 官方认证身份。'
+                            : view === 'status'
+                              ? '查看小时资料是否按时完成、排程检查结果与最近一轮实际采集步骤。'
+                              : '所有统计按北京时间自然日归档，原始时间统一以 UTC 保存。'}
                     </p>
                   </div>
                   <div className="grid grid-cols-3 gap-2 sm:gap-3">
-                    {[
-                      [
-                        '上次成功候选',
-                        data.updatedAt ? String(data.candidateCount) : '—',
-                      ],
-                      ['24h 席位', `${data.rankSlots24h} / 120`],
-                      ['近 24h 成功', `${data.completedHours24h} / 24`],
-                    ].map(([label, value]) => (
+                    {(view === 'deep'
+                      ? [
+                          [
+                            '近期文章',
+                            String(data.deepAnalysis?.articles.length ?? 0),
+                          ],
+                          ['发布时间', '最近 7 天'],
+                          ['每日审查', '北京 08:30'],
+                        ]
+                      : [
+                          [
+                            '上次成功候选',
+                            data.updatedAt ? String(data.candidateCount) : '—',
+                          ],
+                          ['24h 席位', `${data.rankSlots24h} / 120`],
+                          ['近 24h 成功', `${data.completedHours24h} / 24`],
+                        ]
+                    ).map(([label, value]) => (
                       <div
                         key={label}
                         className="rounded-xl border border-border bg-card px-3 py-2.5 sm:min-w-28"
@@ -663,7 +710,9 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   </div>
                 </section>
               ) : null}
-              {isIndexed && Boolean(data.sourceDetails?.warnings?.length) ? (
+              {view !== 'deep' &&
+              isIndexed &&
+              Boolean(data.sourceDetails?.warnings?.length) ? (
                 <details className="mb-5 rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-xs leading-6">
                   <summary className="cursor-pointer font-medium">
                     本轮来源覆盖说明（{data.sourceDetails?.warnings.length} 项）
@@ -676,11 +725,12 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 </details>
               ) : null}
 
-              {data.cooldownUntil ||
-              data.latestAttempt?.error ||
-              data.statusError ||
-              scheduler?.needsAttention ||
-              data.status === 'delayed' ? (
+              {view !== 'deep' &&
+              (data.cooldownUntil ||
+                data.latestAttempt?.error ||
+                data.statusError ||
+                scheduler?.needsAttention ||
+                data.status === 'delayed') ? (
                 <section
                   aria-label="采集状态提示"
                   aria-live="polite"
@@ -731,6 +781,13 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                 </section>
               ) : null}
 
+              {view === 'deep' ? (
+                <DeepAnalysisView
+                  data={data.deepAnalysis}
+                  query={query}
+                  nowMs={Date.parse(data.checkedAt)}
+                />
+              ) : null}
               {view === 'top' ? (
                 data.titleFallback?.items.length &&
                 (data.cooldownUntil ||
@@ -1344,8 +1401,9 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                         </CardTitle>
                       </CardHeader>
                       <CardContent className="text-xs leading-5 text-muted-foreground">
-                        首次采集 48 小时后清除 Reddit
-                        短节录、链接与作者标识；历史页只保留去标识化聚合报告。
+                        小时榜首次采集 48 小时后清除 Reddit
+                        短节录、链接与作者标识。 深度分析只保存最近 7
+                        天的摘要卡片与原帖链接，不保存文章或留言正文；历史周报只保留去标识化摘要。
                       </CardContent>
                     </Card>
                     <Card className="border-0 ring-1 ring-border">
@@ -1373,7 +1431,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
           {statusLabel} · 数据截至 {formatBeijing(data.updatedAt, true)}
           （北京时间）
         </button>
-        <p>仅翻译标题与短节录，请以原帖为准。</p>
+        <p>
+          {view === 'deep'
+            ? '仅提炼作者观点，不做全文翻译，请以原帖为准。'
+            : '仅翻译标题与短节录，请以原帖为准。'}
+        </p>
       </footer>
       <Dialog
         open={Boolean(selected)}

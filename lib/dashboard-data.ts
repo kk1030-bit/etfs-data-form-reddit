@@ -19,6 +19,11 @@ import {
 } from './collector/dashboard-queries';
 import { redditSourceMode, type RedditSourceMode } from './collector/reddit';
 import { hasLlmProvider, type LlmEnv } from './collector/llm';
+import {
+  readDeepData,
+  type DeepData,
+  type DeepWeeklyHighlight,
+} from './collector/deep-analysis-store';
 import type { SourceDetails } from './collector/arctic-shift';
 import {
   readTitleFallback,
@@ -57,6 +62,7 @@ export type DashboardStory = {
 };
 
 export type DashboardReport = {
+  deepAnalysis?: DeepWeeklyHighlight[];
   analysisStatus?: string;
   label: string;
   headline: string;
@@ -75,6 +81,7 @@ export type DashboardAuthor = {
 };
 
 export type DashboardData = {
+  deepAnalysis?: DeepData;
   mode: RedditSourceMode | 'demo';
   status: 'healthy' | 'partial' | 'delayed';
   updatedAt: string | null;
@@ -364,6 +371,7 @@ function emptyData(
 
 export async function getDashboardData(): Promise<DashboardData> {
   const nowMs = Date.now();
+  const deepRead = readDeepData(env.DB, nowMs);
   const window = rollingWindow(nowMs);
   const mode = configuredMode();
   const external =
@@ -379,6 +387,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         )
     : null;
   const withScheduler = async (data: DashboardData): Promise<DashboardData> => {
+    data = { ...data, deepAnalysis: await deepRead };
     if (!schedulerRead) return data;
     const result = await schedulerRead;
     const scheduler = schedulerStatus({
@@ -661,6 +670,10 @@ export async function getDashboardData(): Promise<DashboardData> {
             ? JSON.parse(row.sections_json)
             : {};
         return {
+          deepAnalysis:
+            weekly && Array.isArray(sections.deepAnalysis)
+              ? sections.deepAnalysis
+              : undefined,
           analysisStatus:
             typeof sections.analysisStatus === 'string'
               ? sections.analysisStatus

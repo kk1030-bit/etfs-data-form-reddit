@@ -167,6 +167,7 @@ async function workersAiStructuredResponse(
   schema: object,
   instructions: string,
   input: string,
+  purpose?: 'deep_analysis',
 ): Promise<Record<string, unknown>> {
   const model = workersAiModel(env);
   const request = {
@@ -177,7 +178,7 @@ async function workersAiStructuredResponse(
       },
       { role: 'user', content: `${input}\n/no_think` },
     ],
-    max_tokens: 1_000,
+    max_tokens: purpose ? 1500 : 1000,
     temperature: 0.1,
   };
   let payload: unknown;
@@ -192,7 +193,7 @@ async function workersAiStructuredResponse(
     if (!env.DB) throw new Error('AI budget storage unavailable');
     if (
       new TextEncoder().encode(request.messages.map((m) => m.content).join(''))
-        .length > 6000
+        .length > (purpose ? 18000 : 6000)
     )
       throw new Error('AI input exceeds free-budget limit');
     const reserved =
@@ -207,7 +208,7 @@ async function workersAiStructuredResponse(
         Authorization: `Bearer ${env.WORKERS_AI_RELAY_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify({ ...request, ...(purpose ? { purpose } : {}) }),
       redirect: 'manual',
       signal: AbortSignal.timeout(60_000),
     });
@@ -243,6 +244,35 @@ async function workersAiStructuredResponse(
   const text = workersAiText(payload);
   if (!text) throw new Error('Workers AI returned no output text');
   return parseJsonObject(text);
+}
+
+/** One provider call per deep article; never silently retry with a paid fallback. */
+export async function deepStructuredResponse(
+  env: LlmEnv,
+  schema: object,
+  instructions: string,
+  input: string,
+): Promise<Record<string, unknown> | null> {
+  if (
+    env.AI ||
+    (env.WORKERS_AI_RELAY_URL && env.WORKERS_AI_RELAY_TOKEN) ||
+    (env.WORKERS_AI_ACCOUNT_ID && env.WORKERS_AI_API_TOKEN)
+  ) {
+    return workersAiStructuredResponse(
+      env,
+      schema,
+      instructions,
+      input,
+      'deep_analysis',
+    );
+  }
+  return openAiStructuredResponse(
+    env,
+    'reddit_deep_analysis',
+    schema,
+    instructions,
+    input,
+  );
 }
 
 async function openAiStructuredResponse(

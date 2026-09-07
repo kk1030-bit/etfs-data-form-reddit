@@ -1,0 +1,23 @@
+name: Reddit deep analysis daily
+on:
+  schedule:
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: reddit-deep-analysis
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Collect seven communities and analyze qualified recent articles
+        run: node --experimental-strip-types scripts/collect-deep-analysis.ts
+        env:
+          TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
+          SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}

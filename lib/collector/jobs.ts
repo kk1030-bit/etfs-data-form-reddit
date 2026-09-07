@@ -48,6 +48,7 @@ import {
   collectIndexedCommentCounts,
 } from './arctic-shift.ts';
 import type { ArcticSnapshot } from './arctic-snapshot.ts';
+import { readDeepWeekly } from './deep-analysis-store.ts';
 import {
   ensureHourlyCollection,
   type SchedulerCheck,
@@ -1495,6 +1496,11 @@ export async function runWeekly(
         ).bind(window.startUtc, window.endUtc),
       ),
     ]);
+    const deepAnalysis = await readDeepWeekly(
+      env.DB,
+      window.startUtc,
+      window.endUtc,
+    );
     const daily = dailyRows.map((row) => {
       let themes: string[] = [];
       try {
@@ -1542,6 +1548,7 @@ export async function runWeekly(
       generated?.executiveSummary ||
       `本周汇总 ${daily.length} 份 Reddit ETF 日报与 ${Number(activity.unique_posts)} 个入榜话题。`;
     const sections = {
+      deepAnalysis,
       analysisStatus: generated ? 'ai' : 'aggregate',
       themes: generated?.themes.length ? generated.themes : weeklyThemes,
       dailyCoverage: daily.map((report) => ({
