@@ -57,6 +57,17 @@ export async function GET(request: Request) {
   if (request.headers.get('x-collector-context') !== state?.execution_context)
     return json({ error: 'Prepare collector context first' }, 409);
   return json({
+    reason:
+      runtime.ARCTIC_SHIFT_EXTERNAL !== '1' ||
+      redditSourceMode(runtime) !== 'arctic-shift'
+        ? 'disabled'
+        : run?.status === 'completed'
+          ? 'already_completed'
+          : cooling
+            ? 'cooldown'
+            : busy
+              ? 'busy'
+              : 'collection_needed',
     needed:
       runtime.ARCTIC_SHIFT_EXTERNAL === '1' &&
       redditSourceMode(runtime) === 'arctic-shift' &&
@@ -154,8 +165,13 @@ export async function POST(request: Request) {
           snapshot: parseArcticSnapshot(input.snapshot, runtime),
           executionContext: context,
         };
-    const result = await runHourly(runtime, input.scheduledAtMs, external);
-    return json(result);
+    const aiUsage = { requests: 0 };
+    const result = await runHourly(
+      { ...runtime, AI_CALLS: aiUsage },
+      input.scheduledAtMs,
+      external,
+    );
+    return json({ ...result, aiCalls: aiUsage.requests });
   } catch (error) {
     if (error instanceof RssDeferredError)
       return json(

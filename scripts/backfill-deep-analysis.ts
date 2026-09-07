@@ -4,7 +4,9 @@ import { collectDeepBackfill } from '../lib/collector/deep-analysis-source.ts';
 // Operator-only local experiment. Not imported by the Site or hourly workflow.
 const result = await collectDeepBackfill();
 const directory = new URL(
-  '../outputs/deep-analysis-backfill/',
+  process.argv.includes('--review')
+    ? '../outputs/deep-analysis-ops-review/'
+    : '../outputs/deep-analysis-backfill/',
   import.meta.url,
 );
 await mkdir(directory, { recursive: true });

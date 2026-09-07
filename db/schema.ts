@@ -278,9 +278,33 @@ export const deepAnalysisSeen = sqliteTable(
   {
     id: text('id').primaryKey(),
     seenAtUtc: text('seen_at_utc').notNull(),
+    rubricVersion: text('rubric_version').notNull().default('legacy'),
   },
   (t) => [index('idx_deep_seen_at').on(t.seenAtUtc)],
 );
+
+// Minimal seven-day queue metadata. No original body, comment text or raw AI response.
+export const deepAnalysisCandidates = sqliteTable(
+  'deep_analysis_candidates',
+  {
+    id: text('id').primaryKey(),
+    title: text('title').notNull(),
+    subreddit: text('subreddit').notNull(),
+    characters: integer('characters').notNull(),
+    score: real('score').notNull(),
+    publishedAtUtc: text('published_at_utc').notNull(),
+    status: text('status').notNull(),
+    rubricVersion: text('rubric_version').notNull(),
+  },
+  (t) => [
+    index('idx_deep_candidates_window_score').on(t.publishedAtUtc, t.score),
+  ],
+);
+
+export const deepCalibrationUsage = sqliteTable('deep_calibration_usage', {
+  day: text('day').primaryKey(),
+  requests: integer('requests').notNull().default(0),
+});
 
 export const deepAnalysisAuthors = sqliteTable(
   'deep_analysis_authors',

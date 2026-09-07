@@ -5,7 +5,8 @@ import {
 } from './deep-analysis-source.ts';
 import { scoreDeepAnalysis } from './deep-analysis.ts';
 import {
-  deepSupplementPoints,
+  deepFinalScore,
+  rankDeepCandidates,
   type DeepDailySnapshot,
 } from './deep-analysis-daily.ts';
 import {
@@ -13,7 +14,18 @@ import {
   deepPublishedMs,
   DEEP_WINDOW_MS,
 } from './deep-analysis-dates.ts';
-import { analyzeDeepPost, type DeepAiResult } from './deep-analysis-ai.ts';
+import {
+  analyzeDeepPost,
+  deepAiApproved,
+  deepAiTotal,
+  type DeepAiResult,
+  type DeepAiScores,
+} from './deep-analysis-ai.ts';
+import {
+  DEEP_RUBRIC_VERSION,
+  DEEP_DAILY_REVIEWS,
+  DEEP_CANDIDATE_LIMIT,
+} from './deep-analysis-policy.ts';
 import type { LlmEnv } from './llm.ts';
 
 export type DeepCard = {
@@ -38,7 +50,9 @@ export type DeepCard = {
   counterpoints: string;
   backgroundClaimed: string | null;
   type: DeepAiResult['type'];
-  quality: number;
+  quality?: number; // Previously published v1 cards only.
+  aiScores?: DeepAiScores;
+  rubricVersion?: string;
   permalink: string;
 };
 export type DeepWeeklyHighlight = Pick<
@@ -47,6 +61,7 @@ export type DeepWeeklyHighlight = Pick<
 >;
 export type DeepData = {
   articles: DeepCard[];
+  candidates?: DeepCandidateCard[];
   updatedAt: string | null;
   error: string | null;
   lastRun: {
@@ -55,7 +70,17 @@ export type DeepData = {
     accepted: number;
     rejected: number;
     failed: number;
+    startedAt: string;
+    completedAt: string | null;
   } | null;
+};
+export type DeepCandidateCard = {
+  id: string;
+  title: string;
+  subreddit: string;
+  characters: number;
+  score: number;
+  publishedAt: string;
 };
 type DeepEnv = LlmEnv & { DB: D1Database; TITLE_INGEST_TOKEN?: string };
 const json = (value: unknown, status = 200) =>
@@ -64,12 +89,55 @@ const iso = (ms: number) => new Date(ms).toISOString();
 const safeId = (id: unknown): id is string =>
   typeof id === 'string' && /^[a-z0-9]{1,16}$/.test(id);
 
+export function buildDeepCard(
+  {
+    post,
+    uniqueCommenters,
+    authorLongPosts,
+  }: import('./deep-analysis-daily.ts').DeepFinalist,
+  ai: DeepAiResult,
+  at: string,
+): DeepCard {
+  const base = scoreDeepAnalysis(post);
+  const score = deepFinalScore({ post, uniqueCommenters, authorLongPosts });
+  return {
+    id: String(post.id),
+    title: ai.title_zh,
+    subreddit: post.subreddit,
+    author: String(post.author),
+    authorFlair:
+      typeof post.author_flair_text === 'string' &&
+      post.author_flair_text.trim()
+        ? post.author_flair_text.trim().slice(0, 300)
+        : null,
+    publishedAt: iso(Number(post.created_utc) * 1000),
+    firstSeenAt: at,
+    score,
+    baseScore: base.score,
+    characters: base.details.characters,
+    readingMinutes: Math.max(1, Math.ceil(base.details.characters / 1000)),
+    primarySourceCount: base.details.primarySources.length,
+    hasTable: base.details.structure.table,
+    authorLongPosts,
+    uniqueCommenters,
+    tickers: base.details.tickers,
+    thesis: ai.thesis,
+    keyData: ai.key_data,
+    counterpoints: ai.counterpoints,
+    backgroundClaimed: ai.author_background_claimed,
+    type: ai.type,
+    aiScores: ai.scores,
+    rubricVersion: DEEP_RUBRIC_VERSION,
+    permalink: `https://www.reddit.com/r/${post.subreddit}/comments/${String(post.id)}/`,
+  };
+}
+
 export async function readDeepData(
   db: D1Database,
   now = Date.now(),
 ): Promise<DeepData> {
   try {
-    const [articles, run, completed] = await Promise.all([
+    const [articles, run, completed, candidates] = await Promise.all([
       db
         .prepare(
           'SELECT id, published_at_utc, score, card_json FROM deep_analysis_articles WHERE published_at_utc >= ?1 AND published_at_utc <= ?2 ORDER BY published_at_utc DESC, score DESC, id ASC LIMIT 56',
@@ -83,7 +151,7 @@ export async function readDeepData(
         }>(),
       db
         .prepare(
-          'SELECT day, status, accepted, rejected, failed FROM deep_analysis_runs ORDER BY day DESC LIMIT 1',
+          'SELECT day, status, accepted, rejected, failed, started_at_utc AS startedAt, completed_at_utc AS completedAt FROM deep_analysis_runs ORDER BY day DESC LIMIT 1',
         )
         .first<NonNullable<DeepData['lastRun']>>(),
       db
@@ -91,6 +159,14 @@ export async function readDeepData(
           "SELECT completed_at_utc FROM deep_analysis_runs WHERE status IN ('completed', 'partial') ORDER BY day DESC LIMIT 1",
         )
         .first<{ completed_at_utc: string }>(),
+      db
+        .prepare(`SELECT c.id, c.title, c.subreddit, c.characters, c.score, c.published_at_utc AS publishedAt
+        FROM deep_analysis_candidates c WHERE c.published_at_utc >= ?1 AND c.published_at_utc <= ?2
+        AND c.rubric_version = ?3 AND c.status != 'accepted'
+        AND NOT EXISTS (SELECT 1 FROM deep_analysis_articles a WHERE a.id = c.id)
+        ORDER BY c.score DESC, c.published_at_utc DESC, c.id ASC LIMIT 10`)
+        .bind(iso(now - DEEP_WINDOW_MS), iso(now), DEEP_RUBRIC_VERSION)
+        .all<DeepCandidateCard>(),
     ]);
     return {
       articles: articles.results
@@ -105,12 +181,14 @@ export async function readDeepData(
         )
         .sort(compareDeepRecent),
       updatedAt: completed?.completed_at_utc ?? null,
+      candidates: candidates.results,
       lastRun: run,
       error: null,
     };
   } catch {
     return {
       articles: [],
+      candidates: [],
       updatedAt: null,
       lastRun: null,
       error: '暂时无法读取深度分析，请稍后刷新。',
@@ -168,6 +246,11 @@ export async function beginDeepRun(db: D1Database, now = Date.now()) {
       .prepare('DELETE FROM deep_analysis_seen WHERE seen_at_utc <= ?1')
       .bind(cutoff),
     db
+      .prepare(
+        'DELETE FROM deep_analysis_candidates WHERE published_at_utc < ?1',
+      )
+      .bind(cutoff),
+    db
       .prepare('DELETE FROM deep_analysis_authors WHERE checked_at_utc <= ?1')
       .bind(cutoff),
     db
@@ -176,8 +259,10 @@ export async function beginDeepRun(db: D1Database, now = Date.now()) {
   ]);
   const [seen, authors] = await Promise.all([
     db
-      .prepare('SELECT id FROM deep_analysis_seen WHERE seen_at_utc > ?1')
-      .bind(cutoff)
+      .prepare(
+        'SELECT id FROM deep_analysis_seen WHERE seen_at_utc > ?1 AND rubric_version = ?2 UNION SELECT id FROM deep_analysis_articles WHERE published_at_utc >= ?1',
+      )
+      .bind(cutoff, DEEP_RUBRIC_VERSION)
       .all<{ id: string }>(),
     db
       .prepare(
@@ -221,9 +306,11 @@ export function validateDeepSnapshot(
     !row.seenIds.every(safeId) ||
     new Set(row.seenIds).size !== row.seenIds.length ||
     !Array.isArray(row.finalists) ||
-    row.finalists.length > 8 ||
+    row.finalists.length > DEEP_DAILY_REVIEWS ||
+    !Array.isArray(row.candidates) ||
+    row.candidates.length > DEEP_CANDIDATE_LIMIT ||
     !Array.isArray(row.authors) ||
-    row.authors.length > 8
+    row.authors.length > DEEP_DAILY_REVIEWS
   )
     throw new Error('Invalid snapshot limits');
   for (let i = 0; i < DEEP_COMMUNITIES.length; i++) {
@@ -238,8 +325,21 @@ export function validateDeepSnapshot(
   const count = (value: unknown, max: number) =>
     value === null ||
     (Number.isInteger(value) && Number(value) >= 0 && Number(value) <= max);
+  if (
+    row.screening &&
+    (!Number.isInteger(row.screening.considered) ||
+      row.screening.considered < 0 ||
+      row.screening.considered > 7000 ||
+      !Number.isInteger(row.screening.eligible) ||
+      row.screening.eligible < 0 ||
+      row.screening.eligible > row.screening.considered ||
+      !Number.isInteger(row.screening.qualified) ||
+      row.screening.qualified < row.finalists.length ||
+      row.screening.qualified > row.screening.eligible)
+  )
+    throw new Error('Invalid screening counts');
   const ids = new Set<string>();
-  for (const item of row.finalists) {
+  for (const item of row.candidates) {
     if (!item || typeof item !== 'object') throw new Error('Invalid finalist');
     const p = item.post;
     if (
@@ -247,7 +347,6 @@ export function validateDeepSnapshot(
       typeof p !== 'object' ||
       !safeId(p.id) ||
       ids.has(p.id) ||
-      !row.seenIds.includes(p.id) ||
       !DEEP_COMMUNITIES.includes(
         p.subreddit as (typeof DEEP_COMMUNITIES)[number],
       ) ||
@@ -269,7 +368,7 @@ export function validateDeepSnapshot(
       published === null ||
       published > startedAt ||
       published < startedAt - 72 * 3600000 ||
-      !scoreDeepAnalysis(p, 'reject-matched').finalist
+      !scoreDeepAnalysis(p).finalist
     )
       throw new Error('Ineligible or stale finalist');
     ids.add(p.id);
@@ -278,6 +377,22 @@ export function validateDeepSnapshot(
     for (const field of DEEP_POST_FIELDS) post[field] = p[field] ?? null;
     item.post = post;
   }
+  const selected = rankDeepCandidates(row.candidates).slice(
+    0,
+    DEEP_DAILY_REVIEWS,
+  );
+  if (
+    row.finalists.length !== selected.length ||
+    row.finalists.some(
+      (f, i) =>
+        !f?.post ||
+        f.post.id !== selected[i].post.id ||
+        !row.seenIds.includes(String(f.post.id)),
+    )
+  )
+    throw new Error('Finalists must be the score-ranked top five');
+  // Never trust the separately supplied finalist body or counters.
+  row.finalists = selected;
   for (const a of row.authors) {
     if (
       !a ||
@@ -328,7 +443,10 @@ export async function ingestDeepRun(
       day,
       token,
       data.requests,
-      JSON.stringify({ communities: data.communities }),
+      JSON.stringify({
+        communities: data.communities,
+        screening: data.screening,
+      }),
     )
     .run();
   if (!lease.meta.changes) throw new Error('Run already ingested');
@@ -336,9 +454,9 @@ export async function ingestDeepRun(
   const alreadySeen = new Set<string>();
   for (const item of data.finalists) {
     const seen = await env.DB.prepare(
-      'SELECT id FROM deep_analysis_seen WHERE id = ?1 AND seen_at_utc > ?2',
+      'SELECT id FROM deep_analysis_seen WHERE id = ?1 AND seen_at_utc > ?2 AND rubric_version = ?3 UNION SELECT id FROM deep_analysis_articles WHERE id = ?1',
     )
-      .bind(item.post.id, iso(now - DEEP_WINDOW_MS))
+      .bind(item.post.id, iso(now - DEEP_WINDOW_MS), DEEP_RUBRIC_VERSION)
       .first<{ id: string }>();
     if (seen) alreadySeen.add(seen.id);
   }
@@ -349,8 +467,8 @@ export async function ingestDeepRun(
         .slice(i, i + 50)
         .map((id) =>
           env.DB.prepare(
-            'INSERT INTO deep_analysis_seen (id, seen_at_utc) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING',
-          ).bind(id, at),
+            'INSERT INTO deep_analysis_seen (id, seen_at_utc, rubric_version) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET seen_at_utc = excluded.seen_at_utc, rubric_version = excluded.rubric_version WHERE rubric_version != excluded.rubric_version',
+          ).bind(id, at, DEEP_RUBRIC_VERSION),
         ),
     );
   }
@@ -363,67 +481,101 @@ export async function ingestDeepRun(
   let accepted = 0,
     rejected = 0,
     failed = 0;
+  const aiUsage = { requests: 0 };
+  const diagnostics: Array<Record<string, unknown>> = [];
+  for (const item of data.candidates) {
+    const base = scoreDeepAnalysis(item.post);
+    await env.DB.prepare(`INSERT INTO deep_analysis_candidates (id, title, subreddit, characters, score, published_at_utc, status, rubric_version)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7) ON CONFLICT(id) DO UPDATE SET
+      title = excluded.title, characters = excluded.characters, score = excluded.score,
+      status = CASE WHEN rubric_version = excluded.rubric_version THEN status ELSE 'pending' END,
+      rubric_version = excluded.rubric_version`)
+      .bind(
+        String(item.post.id),
+        String(item.post.title),
+        item.post.subreddit,
+        base.details.characters,
+        deepFinalScore(item),
+        iso(Number(item.post.created_utc) * 1000),
+        DEEP_RUBRIC_VERSION,
+      )
+      .run();
+  }
+  const candidateStatus = (id: unknown, status: string) =>
+    env.DB.prepare(
+      'UPDATE deep_analysis_candidates SET status = ?2 WHERE id = ?1',
+    )
+      .bind(String(id), status)
+      .run();
   for (const { post, uniqueCommenters, authorLongPosts } of data.finalists) {
     if (alreadySeen.has(String(post.id))) continue;
     try {
-      const ai = await analyze(env, post);
-      if (!ai.is_analysis || ai.quality <= 2 || ai.reject_reason !== null) {
+      const ai = await analyze(
+        {
+          ...env,
+          AI_CALLS: aiUsage,
+          AI_TRACE: (event) => diagnostics.push({ id: post.id, ...event }),
+        },
+        post,
+        uniqueCommenters,
+      );
+      if (!deepAiApproved(ai)) {
+        await candidateStatus(post.id, 'rejected');
         rejected++;
         continue;
       }
-      const base = scoreDeepAnalysis(post, 'reject-matched');
-      const extra = deepSupplementPoints(uniqueCommenters, authorLongPosts);
-      const score =
-        Math.round(
-          Math.min(100, base.score + extra.commenters + extra.authorHistory) *
-            100,
-        ) / 100;
-      const card: DeepCard = {
-        id: String(post.id),
-        title: ai.title_zh,
-        subreddit: post.subreddit,
-        author: String(post.author),
-        authorFlair:
-          typeof post.author_flair_text === 'string' &&
-          post.author_flair_text.trim()
-            ? post.author_flair_text.trim().slice(0, 300)
-            : null,
-        publishedAt: iso(Number(post.created_utc) * 1000),
-        firstSeenAt: at,
-        score,
-        baseScore: base.score,
-        characters: base.details.characters,
-        readingMinutes: Math.max(1, Math.ceil(base.details.characters / 1000)),
-        primarySourceCount: base.details.primarySources.length,
-        hasTable: base.details.structure.table,
-        authorLongPosts,
-        uniqueCommenters,
-        tickers: base.details.tickers,
-        thesis: ai.thesis,
-        keyData: ai.key_data,
-        counterpoints: ai.counterpoints,
-        backgroundClaimed: ai.author_background_claimed,
-        type: ai.type,
-        quality: ai.quality,
-        permalink: `https://www.reddit.com/r/${post.subreddit}/comments/${post.id}/`,
-      };
+      const card = buildDeepCard(
+        { post, uniqueCommenters, authorLongPosts },
+        ai,
+        at,
+      );
+      const score = card.score;
       await env.DB.prepare(
         'INSERT INTO deep_analysis_articles (id, published_at_utc, first_seen_at_utc, score, card_json) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO NOTHING',
       )
         .bind(card.id, card.publishedAt, at, score, JSON.stringify(card))
         .run();
       accepted++;
+      await candidateStatus(post.id, 'accepted');
     } catch {
       failed++;
+      await candidateStatus(post.id, 'failed');
+      // Technical failures remain eligible for tomorrow, unlike editorial rejection.
+      await env.DB.prepare(
+        'DELETE FROM deep_analysis_seen WHERE id = ?1 AND seen_at_utc = ?2 AND rubric_version = ?3',
+      )
+        .bind(String(post.id), at, DEEP_RUBRIC_VERSION)
+        .run();
     }
   }
   const status = failed ? 'partial' : 'completed';
   await env.DB.prepare(
-    'UPDATE deep_analysis_runs SET status = ?3, completed_at_utc = ?4, accepted = ?5, rejected = ?6, failed = ?7 WHERE day = ?1 AND token = ?2',
+    'UPDATE deep_analysis_runs SET status = ?3, completed_at_utc = ?4, accepted = ?5, rejected = ?6, failed = ?7, details_json = ?8 WHERE day = ?1 AND token = ?2',
   )
-    .bind(day, token, status, iso(Date.now()), accepted, rejected, failed)
+    .bind(
+      day,
+      token,
+      status,
+      iso(Date.now()),
+      accepted,
+      rejected,
+      failed,
+      JSON.stringify({
+        communities: data.communities,
+        screening: data.screening,
+        aiCalls: aiUsage.requests,
+      }),
+    )
     .run();
-  return { status, accepted, rejected, failed, requests: data.requests };
+  return {
+    status,
+    accepted,
+    rejected,
+    failed,
+    requests: data.requests,
+    aiCalls: aiUsage.requests,
+    diagnostics,
+  };
 }
 
 export async function handleDeepRequest(
@@ -464,8 +616,11 @@ export async function handleDeepRequest(
       upstreamStatus?: number;
       requests?: number;
       retryAfter?: string;
+      post?: unknown;
     };
     if (input.action === 'begin') return json(await beginDeepRun(env.DB));
+    if (input.action === 'calibrate')
+      return json(await calibrateDeepPost(env, input.post));
     if (
       typeof input.day !== 'string' ||
       !/^\d{4}-\d{2}-\d{2}$/.test(input.day) ||
@@ -514,5 +669,84 @@ export async function handleDeepRequest(
       { error: 'Deep collection input rejected or run unavailable' },
       422,
     );
+  }
+}
+
+/** Authenticated, review-only calibration: never publishes, mutates daily runs or consumes source requests. */
+export async function calibrateDeepPost(
+  env: DeepEnv,
+  value: unknown,
+  now = Date.now(),
+) {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid calibration post');
+  const p = value as DeepPost;
+  const created = Number(p.created_utc) * 1000;
+  if (
+    !safeId(p.id) ||
+    !DEEP_COMMUNITIES.includes(
+      p.subreddit as (typeof DEEP_COMMUNITIES)[number],
+    ) ||
+    typeof p.created_utc !== 'number' ||
+    !Number.isFinite(created) ||
+    created > now ||
+    created < now - 30 * 86400000 ||
+    typeof p.selftext !== 'string' ||
+    Array.from(p.selftext.trim()).length < 1000 ||
+    p.selftext.length > 200000 ||
+    typeof p.title !== 'string' ||
+    p.title.length > 1000 ||
+    p.is_self !== true ||
+    (typeof p.author_flair_text !== 'string' && p.author_flair_text !== null)
+  )
+    throw new Error('Invalid calibration post');
+  // Calibration must share the existing atomic global 128/day guard; no paid fallback.
+  if (!env.WORKERS_AI_RELAY_URL || !env.WORKERS_AI_RELAY_TOKEN)
+    throw new Error('Calibration requires budgeted AI relay');
+  const post = { subreddit: p.subreddit } as DeepPost;
+  for (const field of DEEP_POST_FIELDS) post[field] = p[field] ?? null;
+  const base = scoreDeepAnalysis(post);
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const usage = { requests: 0 };
+  try {
+    const ai = await analyzeDeepPost(
+      {
+        ...env,
+        AI_CALLS: usage,
+        AI_TRACE: (event) => diagnostics.push(event),
+        AI_BEFORE_CALL: async () => {
+          const reserved =
+            await env.DB.prepare(`INSERT INTO deep_calibration_usage (day, requests) VALUES (?1, 1)
+          ON CONFLICT(day) DO UPDATE SET requests = requests + 1 WHERE requests < 40`)
+              .bind(iso(Date.now()).slice(0, 10))
+              .run();
+          if (!reserved.meta.changes)
+            throw new Error('Daily calibration AI budget reached');
+        },
+      },
+      post,
+    );
+    return {
+      id: p.id,
+      rubricVersion: DEEP_RUBRIC_VERSION,
+      status: deepAiApproved(ai) ? 'accepted' : 'rejected',
+      scores: ai.scores,
+      total: deepAiTotal(ai),
+      features: base.points,
+      details: base.details,
+      aiCalls: usage.requests,
+      diagnostics,
+    };
+  } catch (error) {
+    const budget = error instanceof Error && /budget/i.test(error.message);
+    return {
+      id: p.id,
+      rubricVersion: DEEP_RUBRIC_VERSION,
+      status: budget ? 'budget' : 'failed',
+      features: base.points,
+      details: base.details,
+      aiCalls: usage.requests,
+      diagnostics,
+    };
   }
 }

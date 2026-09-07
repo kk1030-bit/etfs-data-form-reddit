@@ -42,7 +42,7 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 ## 漏跑检查与补触发
 
-- GitHub 原排程仍为每小时 `:10`。Cloudflare 配置增加每小时 `:00`、`:25`、`:50` 的检查，`:25` 前不补发；第二次检查保留超过 20 分钟的执行缓冲。
+- GitHub 排程为每小时 `:10` 和 `:40`，同小时已成功即跳过。Cloudflare 配置保留每小时 `:00`、`:25`、`:50` 的检查，`:25` 前不补发；第二次检查保留超过 20 分钟的执行缓冲。
 - 当前小时已完成、来源冷却、有效采集锁或 GitHub 已有运行/排队任务时，不重复触发；不清除来源冷却、不回填虚假的历史小时。
 - 缺少本小时结果时，通过固定 GitHub workflow 的 `workflow_dispatch` 补触发。每小时最多两次、间隔至少 20 分钟，使用 D1 原子锁控制并发。请求结果不明确也计入次数，避免重复请求风暴。
 - `scheduler_checks` 独立记录排程检查时间、结果与补触发次数。派发成功只表示 GitHub 接受请求，不代表 Reddit 数据已抓取、翻译或发布；`hourly_runs` 仍只记录实际采集。
@@ -67,7 +67,9 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 ## 零付款 AI
 
-生产使用 @cf/qwen/qwen3-30b-a3b-fp8，Cloudflare Workers Free 方案。D1 原子计数限制 **128 次请求 / UTC 日**；每次最多 6,000 UTF-8 输入字节、1,000 输出 tokens。失败也计数。这个上限不是免费额度余额的精确读数，账户其他 AI 用量也会占用额度。达到免费额度或应用上限即暂停，不自动升级；未配置付费备用密钥。
+生产使用 @cf/qwen/qwen3-30b-a3b-fp8，Cloudflare Workers Free 方案。D1 原子计数限制 **128 次请求 / UTC 日**；小时请求最多 6,000 UTF-8 输入字节、1,000 输出 tokens；深度审查最多 18,000 输入字节、2,000 输出 tokens。失败和重试也计数。这个上限不是免费额度余额的精确读数，账户其他 AI 用量也会占用额度。达到免费额度或应用上限即暂停，不自动升级；未配置付费备用密钥。
+
+深度分析采用本地相对排名：正文至少 1,000 字符及主题资格，20 分地板，初评前 10 查询互动后选前 5 送 AI。AI 按论证／数据／阅读价值各 1–5 分、合计至少 9 分放行。页面分为「精选」与折叠「候选长文」，详见 [深度分析规范](docs/deep-analysis.md)。
 
 ## 本地运行与验证
 
@@ -103,11 +105,14 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 ## 排程
 
-| Cron（UTC）     | 北京时间             | 作业                                           |
-| --------------- | -------------------- | ---------------------------------------------- |
-| 0,25,50 * * * * | 每小时 :00、:25、:50 | 本版 Cloudflare 漏跑检查；需另行发布 Cron 配置 |
-| 0 16 * * *      | 每日 00:00           | 日报                                           |
-| 10 16 * * SUN   | 每周一 00:10         | 周报                                           |
-| 10 * * * *      | 每小时 :10           | GitHub 标题备援、Arctic Shift 采集与追踪       |
+| Cron（UTC）             | 北京时间             | 作业                                             |
+| ----------------------- | -------------------- | ------------------------------------------------ |
+| 0,25,50 * * * *         | 每小时 :00、:25、:50 | 本版 Cloudflare 漏跑检查；需另行发布 Cron 配置   |
+| 0 16 * * *              | 每日 00:00           | 日报                                             |
+| 10 16 * * SUN           | 每周一 00:10         | 周报                                             |
+| 10 * * * * / 40 * * * * | 每小时 :10、:40      | GitHub Arctic Shift 采集与追踪；同小时成功即跳过 |
+| 30 0 * * *              | 每日 08:30           | 深度分析，最近 72 小时，每日一次                 |
+
+两条 Actions 工作流固定使用 Node 22，并将候选数、初筛通过数、入榜数、AI 请求尝试数和最后一次 Arctic 响应的限流剩余额度写入运行摘要。未取得的指标明确显示「未取得」，不当作 0。小时成功后不再请求标题备援，冷却或失败时仍保留备援。
 
 参考：[Arctic Shift API](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md)、[索引字段说明](https://github.com/ArthurHeitmann/arctic_shift/blob/master/file_content_explanations.md)、[Workers AI 免费额度](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。

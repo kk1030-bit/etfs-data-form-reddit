@@ -10,6 +10,7 @@ import {
 import {
   collectDeepDaily,
   deepSupplementPoints,
+  rankDeepCandidates,
   type DeepDailySnapshot,
 } from '../lib/collector/deep-analysis-daily.ts';
 import {
@@ -56,14 +57,12 @@ const post = (id = 'abc', extra: Partial<DeepPost> = {}): DeepPost => ({
 });
 const ai = (extra: Partial<DeepAiResult> = {}): DeepAiResult => ({
   title_zh: 'VOO 配置研究',
-  is_analysis: true,
   type: 'allocation',
   thesis: '作者比较了资产配置方案。',
   key_data: ['观察样本为 10 个。'],
   author_background_claimed: null,
   counterpoints: '原文未充分讨论风险。',
-  quality: 3,
-  reject_reason: null,
+  scores: { reasoning_depth: 3, data_support: 3, reading_value: 3 },
   ...extra,
 });
 const snapshot = (posts: DeepPost[] = [post()]): DeepDailySnapshot => ({
@@ -75,11 +74,18 @@ const snapshot = (posts: DeepPost[] = [post()]): DeepDailySnapshot => ({
   })),
   seenIds: posts.map((p) => String(p.id)),
   authors: [],
-  finalists: posts.map((p) => ({
+  candidates: posts.map((p) => ({
     post: p,
     uniqueCommenters: 7,
     authorLongPosts: 2,
   })),
+  finalists: rankDeepCandidates(
+    posts.map((p) => ({
+      post: p,
+      uniqueCommenters: 7,
+      authorLongPosts: 2,
+    })),
+  ),
 });
 const ok = (data: unknown, headers?: HeadersInit) =>
   Response.json({ data }, { headers });
@@ -103,7 +109,7 @@ void test('publication checks use created_utc seconds; exact seven-day edge pass
   ])
     assert.equal(deepPublishedMs(value, now), null);
 });
-void test('newer qualifying articles precede higher-scoring older articles; ties use score then ID', () => {
+void test('Beijing days descend, then score, publication time and ID within the day', () => {
   const values = [
     { id: 'old', publishedAt: iso(now - 10000), score: 100 },
     { id: 'b', publishedAt: iso(), score: 60 },
@@ -112,7 +118,7 @@ void test('newer qualifying articles precede higher-scoring older articles; ties
   ];
   assert.deepEqual(
     values.sort(compareDeepRecent).map((p) => p.id),
-    ['new', 'a', 'b', 'old'],
+    ['old', 'new', 'a', 'b'],
   );
 });
 void test('new badge is based on publication since yesterday Beijing midnight, never collection date', () => {
@@ -122,7 +128,7 @@ void test('new badge is based on publication since yesterday Beijing midnight, n
   assert.equal(deepIsNew(iso(now + 1), now), false);
   assert.equal(deepIsNew('invalid', now), false);
 });
-void test('daily source uses seven 72h searches, newest eligible first, at most 23 Arctic requests for eight finalists', async () => {
+void test('daily source uses seven 72h searches, ten aggregates then five author badges, 22 requests maximum', async () => {
   const urls: URL[] = [];
   const rows = Array.from({ length: 10 }, (_, i) =>
     post(`p${i}`, {
@@ -167,11 +173,11 @@ void test('daily source uses seven 72h searches, newest eligible first, at most 
     now,
     noSleep,
   );
-  assert.equal(result.requests, 23);
-  assert.equal(urls.length, 23);
+  assert.equal(result.requests, 22);
+  assert.equal(urls.length, 22);
   assert.deepEqual(
     result.finalists.map((f) => f.post.id),
-    rows.slice(0, 8).map((p) => p.id),
+    rows.slice(0, 5).map((p) => p.id),
   );
   assert.ok(
     result.finalists.every(
@@ -183,25 +189,21 @@ void test('daily source uses seven 72h searches, newest eligible first, at most 
   assert.equal(urls[7].searchParams.get('link_id'), 't3_p0');
   assert.equal(urls[7].searchParams.get('limit'), '');
   assert.equal(
-    urls[8].searchParams.get('subreddit'),
+    urls[17].searchParams.get('subreddit'),
     DEEP_COMMUNITIES.join(','),
   );
   assert.equal(
-    urls[8].searchParams.get('fields'),
+    urls[17].searchParams.get('fields'),
     'id,subreddit,created_utc,selftext',
   );
   validateDeepSnapshot(result, now, now);
 });
-void test('daily collection and server validation share the 35-point base threshold', async () => {
+void test('daily collection and server validation share the 20-point queue floor', async () => {
   const accepted = post('at35', {
-    selftext:
-      '# Research\nVOO VTI VXUS BND QQQ\n| A | B |\n| --- | --- |\n'.padEnd(
-        1500,
-        'x',
-      ),
+    selftext: '# Research\nVOO VTI BND\n'.padEnd(1000, 'x'),
   });
   const below = post('below35', {
-    selftext: 'VOO VTI BND QQQ 1 2 3 '.padEnd(3030, 'x'),
+    selftext: 'VOO '.padEnd(1000, 'x'),
   });
   const result = await collectDeepDaily(
     { seenIds: [], authors: [] },
@@ -307,14 +309,14 @@ void test('supplemental missing metrics stay null instead of claiming no discuss
   );
   assert.equal(result.finalists[0].uniqueCommenters, null);
 });
-void test('supplement scores use log2(1+n) and two points per long article with individual caps', () => {
+void test('interaction uses twice log2(1+n); author history has zero weight', () => {
   assert.deepEqual(deepSupplementPoints(7, 3), {
-    commenters: 3,
-    authorHistory: 6,
+    commenters: 6,
+    authorHistory: 0,
   });
   assert.deepEqual(deepSupplementPoints(100000, 50), {
     commenters: 10,
-    authorHistory: 10,
+    authorHistory: 0,
   });
   assert.deepEqual(deepSupplementPoints(null, null), {
     commenters: 0,
@@ -336,18 +338,18 @@ void test('AI excerpt is UTF-8 bounded, includes conclusion and never duplicates
   assert.equal((out.head + out.tail).includes('�'), false);
   assert.equal(out.omitted, true);
 });
-void test('AI result validation requires Chinese, bounded schema and explicit rejection flags', () => {
-  assert.equal(validateDeepAi(ai(), '').quality, 3);
+void test('AI result validation requires Chinese and three integer scores from one to five', () => {
+  assert.equal(validateDeepAi(ai(), '').scores.reading_value, 3);
   for (const value of [
     ai({ thesis: '文'.repeat(81) }),
     ai({ title_zh: 'English only' }),
-    ai({ quality: 6 }),
+    ai({ scores: { reasoning_depth: 6, data_support: 3, reading_value: 3 } }),
     ai({ key_data: ['a', 'b', 'c', 'd'] }),
     ai({ counterpoints: '' }),
   ])
     assert.throws(() => validateDeepAi(value, ''));
 });
-void test('deep AI makes one call, includes head/tail and does not fall back after provider failure', async () => {
+void test('deep AI succeeds once, includes head/tail and retries provider failure once without switching providers', async () => {
   let calls = 0,
     observed = '';
   const result = await analyzeDeepPost(
@@ -381,7 +383,7 @@ void test('deep AI makes one call, includes head/tail and does not fall back aft
       post(),
     ),
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 void test('daily claim is atomic and cannot reset the request budget with another manual dispatch', async () => {
   const t = testDb();
@@ -437,11 +439,29 @@ void test('ingest applies AI gate once, preserves original publication, caps sco
         if (p.id === 'fail') throw new Error('no AI');
         return ai(
           p.id === 'reject'
-            ? { reject_reason: 'promotion' }
+            ? {
+                scores: {
+                  reasoning_depth: 1,
+                  data_support: 1,
+                  reading_value: 1,
+                },
+              }
             : p.id === 'low'
-              ? { quality: 2 }
+              ? {
+                  scores: {
+                    reasoning_depth: 2,
+                    data_support: 3,
+                    reading_value: 3,
+                  },
+                }
               : p.id === 'false'
-                ? { is_analysis: false }
+                ? {
+                    scores: {
+                      reasoning_depth: 3,
+                      data_support: 1,
+                      reading_value: 2,
+                    },
+                  }
                 : {},
         );
       },
@@ -503,7 +523,7 @@ void test('public reads enforce a rolling publication window even before cleanup
     const result = await readDeepData(t.db, now);
     assert.deepEqual(
       result.articles.map((a) => a.id),
-      ['new', 'recent', 'edge'],
+      ['recent', 'new', 'edge'],
     );
     const plan = t.sqlite
       .prepare(
@@ -525,14 +545,54 @@ void test('public reads enforce a rolling publication window even before cleanup
     t.close();
   }
 });
+void test('deep ingestion persists request-local AI attempts including provider failures', async () => {
+  const t = testDb();
+  try {
+    const run = await beginDeepRun(t.db, now);
+    let calls = 0;
+    const result = await ingestDeepRun(
+      {
+        DB: t.db,
+        AI: {
+          run: async () => {
+            if (++calls >= 2) throw new Error('provider unavailable');
+            return { response: JSON.stringify(ai()) };
+          },
+        },
+      },
+      run.day,
+      run.token!,
+      snapshot([post('one'), post('two')]),
+      now,
+    );
+    assert.equal(result.aiCalls, 3);
+    assert.equal(result.accepted, 1);
+    assert.equal(result.failed, 1);
+    assert.equal(result.status, 'partial');
+    const stored = t.sqlite
+      .prepare('SELECT details_json FROM deep_analysis_runs WHERE day = ?')
+      .get(run.day);
+    assert.equal(JSON.parse(String(stored?.details_json)).aiCalls, 3);
+    const publicData = await readDeepData(t.db, now);
+    assert.equal(publicData.lastRun?.startedAt, iso());
+    assert.equal(publicData.lastRun?.status, 'partial');
+    assert.equal('token' in publicData.lastRun!, false);
+  } finally {
+    t.close();
+  }
+});
 void test('daily cleanup expires only deep seen/author cache and preserves unrelated hourly data', async () => {
   const t = testDb();
   try {
     t.sqlite
-      .prepare('INSERT INTO deep_analysis_seen VALUES (?, ?)')
+      .prepare(
+        "INSERT INTO deep_analysis_seen VALUES (?, ?, 'reddit-depth-v2')",
+      )
       .run('expired', iso(now - DEEP_WINDOW_MS));
     t.sqlite
-      .prepare('INSERT INTO deep_analysis_seen VALUES (?, ?)')
+      .prepare(
+        "INSERT INTO deep_analysis_seen VALUES (?, ?, 'reddit-depth-v2')",
+      )
       .run('kept', iso(now - DEEP_WINDOW_MS + 1));
     t.sqlite
       .prepare('INSERT INTO deep_analysis_authors VALUES (?, ?, ?)')
@@ -601,7 +661,7 @@ void test('internal endpoint rejects unauthenticated writes, oversized input and
     t.close();
   }
 });
-void test('daily workflow is 00:30 UTC and keeps existing hourly workflow unchanged', () => {
+void test('workflows pin Node 22, expose summaries and use daily plus redundant hourly schedules', () => {
   const daily = readFileSync(
     new URL('../.github/workflows/deep-analysis.yml', import.meta.url),
     'utf8',
@@ -615,6 +675,14 @@ void test('daily workflow is 00:30 UTC and keeps existing hourly workflow unchan
     'utf8',
   );
   assert.match(hourly, /10 \* \* \* \*/);
+  assert.match(hourly, /40 \* \* \* \*/);
+  for (const workflow of [daily, hourly]) {
+    assert.match(workflow, /actions\/setup-node@[a-f0-9]{40}/);
+    assert.match(workflow, /node-version: '22'/);
+    assert.match(workflow, /GITHUB_STEP_SUMMARY/);
+    assert.match(workflow, /always\(\)/);
+  }
+  assert.match(hourly, /steps.arctic.outputs.skip_fallback != 'true'/);
   assert.ok(scoreDeepAnalysis(post(), 'reject-matched').finalist);
 });
 
@@ -667,6 +735,14 @@ void test('relay allows the deep excerpt size only for authenticated deep reques
       run: async (_model: string, input: Record<string, unknown>) => {
         calls++;
         outputTokens = Number(input.max_tokens);
+        if (outputTokens === 2000) {
+          assert.equal(input.raw, true);
+          assert.match(
+            String(input.prompt),
+            /<\|im_start\|>assistant\n<think>\n\n<\/think>\n\n$/,
+          );
+          assert.equal(input.messages, undefined);
+        } else assert.ok(Array.isArray(input.messages));
         return { response: JSON.stringify(ai()) };
       },
     },
@@ -695,7 +771,7 @@ void test('relay allows the deep excerpt size only for authenticated deep reques
     );
   assert.equal((await invoke('deep_analysis', 12000)).status, 200);
   assert.equal(calls, 1);
-  assert.equal(outputTokens, 1500);
+  assert.equal(outputTokens, 2000);
   assert.equal((await invoke(undefined, 12000)).status, 413);
   assert.equal((await invoke('deep_analysis', 18001)).status, 413);
   assert.equal((await invoke('unknown', 100)).status, 400);

@@ -819,6 +819,7 @@ void test('AI relay accepts Qwen chat responses, preserves extraction-only instr
     WORKERS_AI_RELAY_URL:
       'https://etfs-hot-topics-collector.etfs-hot-topics-kk1030.workers.dev/ai',
     WORKERS_AI_RELAY_TOKEN: 'test-only',
+    AI_CALLS: { requests: 0 },
   };
   assert.equal(
     (await analyzePost(env, normalizeIndexedPost(post())!))?.titleZh,
@@ -830,4 +831,5 @@ void test('AI relay accepts Qwen chat responses, preserves extraction-only instr
     /Daily free AI budget/,
   );
   assert.equal(calls, 1);
+  assert.equal(env.AI_CALLS.requests, 1);
 });

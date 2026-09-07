@@ -17,6 +17,10 @@ export const DEEP_ETF_TICKERS = new Set([
   'KMLM',
   'DBMF',
   'SPYM',
+  'VWCE',
+  'IWDA',
+  'EIMI',
+  'SXR8',
 ]);
 export const BOGLEHEADS_FUND_TICKERS = new Set([
   'VTSAX',
@@ -39,7 +43,10 @@ export const BOGLEHEADS_FUND_TICKERS = new Set([
 export const ACCEPT_DEEP_FLAIR =
   /theory|discussion|analysis|macro|commentary|backtest|research|education/i;
 export const REJECT_DEEP_FLAIR = /question|advice|review|help|rate/i;
-export type FlairPolicy = 'reject-matched' | 'require-accepted';
+export type FlairPolicy =
+  | 'observe-only'
+  | 'reject-matched'
+  | 'require-accepted';
 
 const macroTerms: Array<[string, RegExp]> = [
   ['Fed', /\bFed\b/i],
@@ -59,6 +66,21 @@ const macroTerms: Array<[string, RegExp]> = [
   ['tax-loss', /\btax[ -]+loss\b/i],
   ['TIPS', /\bTIPS\b/i],
   ['treasury', /\btreasur(?:y|ies)\b/i],
+  ['backtest', /\bbacktest\w*\b/i],
+  ['CAGR', /\bCAGR\b/i],
+  ['Sharpe', /\bSharpe\b/i],
+  ['drawdown', /\bdrawdowns?\b/i],
+  ['sequence of returns', /\bsequence[ -]+of[ -]+returns\b/i],
+  ['SWR', /\bSWR\b/i],
+  ['Monte Carlo', /\bMonte[ -]+Carlo\b/i],
+  ['CAPE', /\bCAPE\b/i],
+  ['equity risk premium', /\bequity[ -]+risk[ -]+premium\b/i],
+  ['correlation', /\bcorrelations?\b/i],
+  ['tax drag', /\btax[ -]+drag\b/i],
+  ['three-fund', /\bthree[ -]+fund\b/i],
+  ['target date', /\btarget[ -]+date\b/i],
+  ['covered call', /\bcovered[ -]+calls?\b/i],
+  ['buffer', /\bbuffers?\b/i],
 ];
 const primaryDomains = [
   'sec.gov',
@@ -74,6 +96,13 @@ const primaryDomains = [
   'invesco.com',
   'ssrn.com',
   'nber.org',
+  'portfoliovisualizer.com',
+  'testfol.io',
+  'morningstar.com',
+  'etf.com',
+  'i.redd.it',
+  'preview.redd.it',
+  'imgur.com',
 ];
 
 export type DeepAnalysisScore = {
@@ -87,7 +116,12 @@ export type DeepAnalysisScore = {
     tickers: string[];
     macroTerms: string[];
     unknownDollarTickers: string[];
-    structure: { headings: boolean; table: boolean; numberedList: boolean };
+    structure: {
+      headings: boolean;
+      table: boolean;
+      numberedList: boolean;
+      bold: boolean;
+    };
     numberCount: number;
     numbersPerThousandCharacters: number;
     primarySources: string[];
@@ -113,7 +147,13 @@ function primarySources(body: string): string[] {
   const sources = new Set<string>();
   for (const raw of body.match(/https?:\/\/[^\s<>"\])]+/gi) ?? []) {
     try {
-      const host = new URL(raw).hostname.toLowerCase();
+      const url = new URL(raw);
+      const host = url.hostname.toLowerCase();
+      if (
+        (host === 'bogleheads.org' || host.endsWith('.bogleheads.org')) &&
+        /^\/wiki(?:\/|$)/i.test(url.pathname)
+      )
+        sources.add('bogleheads.org/wiki');
       const domain = primaryDomains.find(
         (item) => host === item || host.endsWith(`.${item}`),
       );
@@ -125,10 +165,10 @@ function primarySources(body: string): string[] {
   return [...sources].sort();
 }
 
-/** Approved initial formula only; no AI, author history or commenter network calls. */
+/** Local queue score (90 max before interaction); AI alone decides editorial quality. */
 export function scoreDeepAnalysis(
   post: DeepPost,
-  flairPolicy: FlairPolicy,
+  flairPolicy: FlairPolicy = 'observe-only',
 ): DeepAnalysisScore {
   const title = text(post.title);
   const body = text(post.selftext);
@@ -181,11 +221,13 @@ export function scoreDeepAnalysis(
     macros.length < 3
   )
     reasons.push('single_stock_flair');
-  if (flairDecision === 'rejected') reasons.push('rejected_flair');
+  if (flairPolicy !== 'observe-only' && flairDecision === 'rejected')
+    reasons.push('rejected_flair');
   if (flairPolicy === 'require-accepted' && flairDecision === 'unclassified')
     reasons.push('unclassified_flair');
 
   const characters = Array.from(body).length;
+  if (characters < 1000) reasons.push('too_short');
   const markdown = body.replace(/^\s*(```|~~~)[\s\S]*?^\s*\1[^\n]*$/gm, '');
   const structure = {
     headings:
@@ -195,7 +237,8 @@ export function scoreDeepAnalysis(
       /^\s*\|?\s*:?-{3,}:?\s*\|\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)*\s*\|?\s*$/m.test(
         markdown,
       ),
-    numberedList: /^\s{0,3}\d+[.)]\s+\S/m.test(markdown),
+    numberedList: /^\s{0,3}(?:\d+[.)]|[-+*])\s+\S/m.test(markdown),
+    bold: /(?:\*\*[^*\n]+\*\*|__[^_\n]+__)/.test(markdown),
   };
   // A number with a trailing % is one item, not two. URL IDs are not data values.
   const numericText = body.replace(/https?:\/\/\S+/gi, '');
@@ -211,23 +254,24 @@ export function scoreDeepAnalysis(
   );
   const points = {
     length:
-      characters > 6000
-        ? 35
-        : characters >= 3000
-          ? 30
-          : characters >= 1500
-            ? 20
+      characters >= 3500
+        ? 25
+        : characters >= 2000
+          ? 18
+          : characters >= 1000
+            ? 10
             : 0,
-    structure: Object.values(structure).filter(Boolean).length * 5,
-    dataDensity: Math.min(15, density),
+    structure: Math.min(
+      15,
+      Object.values(structure).filter(Boolean).length * 4,
+    ),
+    dataDensity: Math.min(20, 5 * Math.log2(1 + density)),
     primarySources: Math.min(15, sources.length * 5),
-    topic: Math.min(10, tickers.length + macros.length),
-    authorFlair: authorFlairClaim ? 5 : 0,
-    questionPenalty: /[?？]$/.test(title) ? -15 : 0,
-    helpPenalty: /\b(?:should\s+I|help|advice|new\s+to|rate\s+my)\b/i.test(
-      title,
-    )
-      ? -20
+    topic: Math.min(15, 3 * Math.log2(1 + tickers.length + macros.length)),
+    authorFlair: 0,
+    questionPenalty: characters < 2000 && /[?？]$/.test(title) ? -5 : 0,
+    helpPenalty: /\b(?:should\s+I|help|advice|beginner)\b/i.test(title)
+      ? -10
       : 0,
   };
   const score =

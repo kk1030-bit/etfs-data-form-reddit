@@ -6,7 +6,11 @@ import {
   type DeepPost,
 } from './deep-analysis-source.ts';
 import { scoreDeepAnalysis } from './deep-analysis.ts';
-import { compareDeepRecent, deepPublishedMs } from './deep-analysis-dates.ts';
+import { deepPublishedMs } from './deep-analysis-dates.ts';
+import {
+  DEEP_CANDIDATE_LIMIT,
+  DEEP_DAILY_REVIEWS,
+} from './deep-analysis-policy.ts';
 
 export type DeepAuthorCache = {
   author: string;
@@ -25,23 +29,46 @@ export type DeepDailySnapshot = {
   seenIds: string[];
   authors: DeepAuthorCache[];
   finalists: DeepFinalist[];
+  candidates: DeepFinalist[];
+  screening?: { considered: number; eligible: number; qualified: number };
 };
 
 export function deepSupplementPoints(
   uniqueCommenters: number | null,
-  authorLongPosts: number | null,
+  _authorLongPosts: number | null,
 ) {
   return {
     commenters:
       uniqueCommenters === null
         ? 0
-        : Math.min(10, Math.log2(1 + uniqueCommenters)),
-    authorHistory:
-      authorLongPosts === null ? 0 : Math.min(10, authorLongPosts * 2),
+        : Math.min(10, 2 * Math.log2(1 + uniqueCommenters)),
+    authorHistory: 0,
   };
 }
 
-/** Seven serial searches, then at most two supplemental searches per finalist. No retries. */
+export function deepFinalScore(item: DeepFinalist): number {
+  const base = scoreDeepAnalysis(item.post);
+  return (
+    Math.round(
+      Math.min(
+        100,
+        base.score +
+          deepSupplementPoints(item.uniqueCommenters, null).commenters,
+      ) * 100,
+    ) / 100
+  );
+}
+
+export function rankDeepCandidates(items: DeepFinalist[]): DeepFinalist[] {
+  return [...items].sort(
+    (a, b) =>
+      deepFinalScore(b) - deepFinalScore(a) ||
+      Number(b.post.created_utc) - Number(a.post.created_utc) ||
+      String(a.post.id).localeCompare(String(b.post.id)),
+  );
+}
+
+/** 7 searches + at most 10 commenter aggregates + at most 5 author badge lookups. */
 export async function collectDeepDaily(
   state: { seenIds: string[]; authors: DeepAuthorCache[] },
   fetcher: typeof fetch = fetch,
@@ -55,6 +82,8 @@ export async function collectDeepDaily(
     seenIds: [],
     authors: [],
     finalists: [],
+    candidates: [],
+    screening: { considered: 0, eligible: 0, qualified: 0 },
   };
   const paced = createArcticFetcher(fetcher, sleep);
   const request = async (
@@ -142,7 +171,10 @@ export async function collectDeepDaily(
       seen.add(row.id);
       const post = { subreddit } as DeepPost;
       for (const field of DEEP_POST_FIELDS) post[field] = row[field] ?? null;
-      const scored = scoreDeepAnalysis(post, 'reject-matched');
+      const scored = scoreDeepAnalysis(post);
+      result.screening!.considered++;
+      if (scored.eligible) result.screening!.eligible++;
+      if (scored.finalist) result.screening!.qualified++;
       if (!scored.finalist) {
         result.seenIds.push(row.id);
         continue;
@@ -165,9 +197,15 @@ export async function collectDeepDaily(
       .map((a) => [a.author.toLowerCase(), a]),
   );
   // Qualified overflow is left unseen so tomorrow's 72h search can still consider it.
-  for (const { post, id } of candidates.sort(compareDeepRecent).slice(0, 8)) {
+  for (const { post, id } of candidates
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        Number(b.post.created_utc) - Number(a.post.created_utc) ||
+        a.id.localeCompare(b.id),
+    )
+    .slice(0, DEEP_CANDIDATE_LIMIT)) {
     let uniqueCommenters: number | null = null;
-    let authorLongPosts: number | null = null;
     try {
       const groups = await request(
         '/api/comments/search/aggregate',
@@ -194,6 +232,16 @@ export async function collectDeepDaily(
               a !== '[deleted]' && a !== '[removed]' && a !== 'automoderator',
           ),
       ).size;
+    } catch (error) {
+      if (error instanceof RedditRssError && error.status === 429) throw error;
+    }
+    result.candidates.push({ post, uniqueCommenters, authorLongPosts: null });
+  }
+  result.candidates = rankDeepCandidates(result.candidates);
+  result.finalists = result.candidates.slice(0, DEEP_DAILY_REVIEWS);
+  for (const item of result.finalists) {
+    const { post } = item;
+    try {
       const author = typeof post.author === 'string' ? post.author : '';
       if (/^[A-Za-z0-9_-]{1,32}$/.test(author)) {
         let entry = cache.get(author.toLowerCase());
@@ -235,15 +283,14 @@ export async function collectDeepDaily(
           cache.set(author.toLowerCase(), entry);
           result.authors.push(entry);
         }
-        authorLongPosts = entry.longPosts;
+        item.authorLongPosts = entry.longPosts;
       }
     } catch (error) {
       // A global rate limit stops the run; never disguise it as zero discussion.
       if (error instanceof RedditRssError && error.status === 429) throw error;
       // Missing supplemental metrics stay null, not fabricated zeroes.
     }
-    result.finalists.push({ post, uniqueCommenters, authorLongPosts });
-    result.seenIds.push(id);
+    result.seenIds.push(String(post.id));
   }
   return result;
 }

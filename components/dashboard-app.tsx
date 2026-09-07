@@ -40,7 +40,12 @@ import {
 import { Input } from '@/components/ui/input';
 import { LeadTopics } from '@/components/lead-topics';
 import { DeepAnalysisView } from '@/components/deep-analysis-view';
+import { defaultDeepView } from '@/lib/collector/deep-analysis-dates';
 import { commentMetricLabel, commentGrowthLabel } from '@/lib/comment-metric';
+import {
+  hourlyCollectionHistory,
+  hourlyCollectionLabel,
+} from '@/lib/hourly-collection-history';
 import {
   Dialog,
   DialogContent,
@@ -327,7 +332,12 @@ function ReportsView({
 
 export function DashboardApp({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [view, setView] = useState<ViewId>('deep');
+  const [view, setView] = useState<ViewId>(() =>
+    defaultDeepView(
+      initialData.deepAnalysis?.articles,
+      Date.parse(initialData.checkedAt),
+    ),
+  );
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -426,6 +436,11 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
 
   const activeLabel = navigation.find((item) => item.id === view)?.label ?? '';
   const scheduler = data.scheduler;
+  const hourlyHistory = hourlyCollectionHistory(
+    data.recentRuns,
+    Date.parse(data.checkedAt),
+    Boolean(data.statusError),
+  );
   const statusLabel = scheduler?.isOverdue
     ? '小时采集漏跑／待完成'
     : scheduler?.checkUnavailable || scheduler?.checkStale
@@ -1067,69 +1082,18 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                   <Card className="border-0 ring-1 ring-border">
                     <CardHeader>
                       <CardTitle className="text-base font-semibold">
-                        {scheduler
-                          ? '本小时排程与数据状态'
-                          : '最近一轮实际采集'}
+                        最近一轮采集流程
                       </CardTitle>
                       <CardDescription>
-                        {scheduler ? '本小时：' : '采集所属小时：'}
-                        {formatBeijing(
-                          scheduler?.currentHour ??
-                            data.latestAttempt?.logicalHour,
-                          true,
-                        )}
-                        {scheduler ? '；应完成小时：' : '；实际开始于 '}
-                        {formatBeijing(
-                          scheduler?.expectedHour ??
-                            data.latestAttempt?.startedAt,
-                          true,
-                        )}
+                        采集所属小时：
+                        {formatBeijing(data.latestAttempt?.logicalHour, true)}
+                        ；开始于{' '}
+                        {formatBeijing(data.latestAttempt?.startedAt, true)}
                         （北京时间）
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-1">
-                      {scheduler ? (
-                        <div className="mb-4 space-y-2 text-sm leading-6">
-                          <p className="font-medium">{scheduler.message}</p>
-                          <Badge variant="outline">
-                            Cloudflare：{scheduler.checkLabel}
-                          </Badge>
-                          <p className="text-muted-foreground">
-                            {scheduler.checkMessage}
-                          </p>
-                        </div>
-                      ) : null}
                       <dl className="mb-4 grid gap-3 rounded-xl bg-muted/50 p-4 text-xs sm:grid-cols-2">
-                        {scheduler ? (
-                          <>
-                            <div>
-                              <dt className="text-muted-foreground">
-                                最新 Cloudflare 排程检查
-                              </dt>
-                              <dd className="mt-1 font-medium">
-                                {formatBeijing(
-                                  scheduler.latestCheck?.checkedAt,
-                                  true,
-                                )}
-                                <span className="mt-1 block text-muted-foreground">
-                                  检查所属小时：
-                                  {formatBeijing(
-                                    scheduler.latestCheck?.logicalHour,
-                                    true,
-                                  )}
-                                </span>
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="text-muted-foreground">
-                                应完成小时的检查期限
-                              </dt>
-                              <dd className="mt-1 font-medium">
-                                {formatBeijing(scheduler.deadlineAt, true)}
-                              </dd>
-                            </div>
-                          </>
-                        ) : null}
                         <div>
                           <dt className="text-muted-foreground">
                             最后成功采集完成于
@@ -1170,66 +1134,12 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                             {formatBeijing(data.checkedAt, true)}
                           </dd>
                         </div>
-                        {scheduler ? (
-                          <>
-                            <div>
-                              <dt className="text-muted-foreground">
-                                下一次 GitHub 正常排程
-                              </dt>
-                              <dd className="mt-1 font-medium">
-                                {formatBeijing(scheduler.nextExpectedAt, true)}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="text-muted-foreground">
-                                下一次 Cloudflare 检查
-                              </dt>
-                              <dd className="mt-1 font-medium">
-                                {formatBeijing(scheduler.nextCheckAt, true)}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="text-muted-foreground">
-                                最近检查小时的补触发次数
-                              </dt>
-                              <dd className="mt-1 font-medium">
-                                {scheduler.latestCheck?.attempts ?? '暂无记录'}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="text-muted-foreground">
-                                最近补触发时间
-                              </dt>
-                              <dd className="mt-1 font-medium">
-                                {formatBeijing(
-                                  scheduler.latestCheck?.lastDispatchAt,
-                                  true,
-                                )}
-                              </dd>
-                            </div>
-                          </>
-                        ) : null}
                       </dl>
-                      <div className="pb-3 pt-2">
-                        <h3 className="text-sm font-medium">
-                          最近一轮实际采集
-                        </h3>
-                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                          所属小时：
-                          {formatBeijing(data.latestAttempt?.logicalHour, true)}
-                          ；开始：
-                          {formatBeijing(data.latestAttempt?.startedAt, true)}
-                          ；完成：
-                          {formatBeijing(data.latestAttempt?.completedAt, true)}
-                          。
-                          下方步骤记录该轮实际采集，完成标记对应该轮所属小时。
+                      {data.latestAttempt?.error ? (
+                        <p className="py-2 text-xs leading-5 text-muted-foreground">
+                          {data.latestAttempt.error}
                         </p>
-                        {data.latestAttempt?.error ? (
-                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                            {data.latestAttempt.error}
-                          </p>
-                        ) : null}
-                      </div>
+                      ) : null}
                       {data.latestAttempt?.stage === 'preparing' ||
                       data.latestAttempt?.stage === 'unknown' ? (
                         <p className="py-2 text-xs text-muted-foreground">
@@ -1270,35 +1180,43 @@ export function DashboardApp({ initialData }: { initialData: DashboardData }) {
                           </Badge>
                         </div>
                       ))}
-                      {data.recentRuns?.length ? (
-                        <div className="pt-6">
-                          <h3 className="text-sm font-medium">
-                            近 24 小时实际采集记录
-                          </h3>
-                          <div className="mt-3 grid grid-cols-6 gap-2 sm:grid-cols-8">
-                            {[...data.recentRuns].reverse().map((run) => (
-                              <div
-                                key={run.hour}
-                                title={`${formatBeijing(run.hour, true)} · ${run.status} · ${run.selected} 篇`}
-                                className={`rounded-md border p-2 text-center text-xs ${run.status === 'completed' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700' : run.status === 'running' ? 'border-primary/20 bg-primary/10' : 'border-amber-500/20 bg-amber-500/5 text-amber-700'}`}
-                              >
-                                <div>{formatBeijing(run.hour).slice(-5)}</div>
-                                <div className="mt-1">
-                                  {run.status === 'completed'
-                                    ? `${run.selected} 篇`
-                                    : run.status === 'running'
-                                      ? '采集中'
-                                      : run.status === 'cooldown'
-                                        ? '冷却'
-                                        : run.status === 'deferred'
-                                          ? '暂缓'
-                                          : '失败'}
-                                </div>
+                      <section
+                        className="pt-6"
+                        aria-labelledby="hourly-collection-history-title"
+                      >
+                        <h3
+                          id="hourly-collection-history-title"
+                          className="text-sm font-medium"
+                        >
+                          近 24 小时实际采集记录
+                        </h3>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {data.statusError ||
+                          !Array.isArray(data.recentRuns) ||
+                          !hourlyHistory.length
+                            ? '采集记录暂时无法读取，不推测各小时是否执行。'
+                            : hourlyHistory.every(
+                                  (run) => run.status === 'not_run',
+                                )
+                              ? '当前环境近 24 小时暂无实际采集记录。未执行表示该小时没有采集记录。'
+                              : '北京时间；未执行表示该小时没有采集记录，不代表冷却或成功。'}
+                        </p>
+                        <ol className="mt-3 grid list-none grid-cols-6 gap-2 p-0 sm:grid-cols-8">
+                          {hourlyHistory.map((run) => (
+                            <li
+                              key={run.hour}
+                              aria-label={`${formatBeijing(run.hour, true)} · ${hourlyCollectionLabel(run)}`}
+                              title={`${formatBeijing(run.hour, true)} · ${hourlyCollectionLabel(run)}`}
+                              className={`rounded-md border p-2 text-center text-xs ${run.status === 'completed' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700' : run.status === 'running' ? 'border-primary/20 bg-primary/10' : run.status === 'failed' ? 'border-destructive/20 bg-destructive/10 text-destructive' : run.status === 'cooldown' || run.status === 'deferred' ? 'border-amber-500/20 bg-amber-500/5 text-amber-700' : 'border-border bg-muted/40 text-muted-foreground'}`}
+                            >
+                              <div>{formatBeijing(run.hour).slice(-5)}</div>
+                              <div className="mt-1">
+                                {hourlyCollectionLabel(run)}
                               </div>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
+                            </li>
+                          ))}
+                        </ol>
+                      </section>
                     </CardContent>
                   </Card>
                   <div className="space-y-4">

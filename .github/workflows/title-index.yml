@@ -2,6 +2,7 @@ name: Reddit hourly collector
 on:
   schedule:
     - cron: '10 * * * *'
+    - cron: '40 * * * *'
   workflow_dispatch:
     inputs:
       diagnostics:
@@ -21,7 +22,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, pinned
         with:
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4, pinned
+        with:
+          node-version: '22'
       - name: Read Arctic Shift serially and ingest into Cloudflare
+        id: arctic
         run: node --experimental-strip-types scripts/collect-arctic-index.ts
         env:
           TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
@@ -39,8 +44,14 @@ jobs:
           curl -si 'https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=ETFs&limit=1'
           echo "::$marker::"
       - name: Read public RSS once and store private title index
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.arctic.outputs.skip_fallback != 'true' }}
         run: node scripts/collect-title-index.mjs
         env:
           TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
           SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}
+      - name: Workflow outcome
+        if: ${{ always() }}
+        shell: bash
+        env:
+          COLLECT_OUTCOME: ${{ steps.arctic.outcome }}
+        run: printf '小时采集步骤状态：%s。详细计数见采集步骤摘要；步骤未启动或被取消时计数不可用。\n' "$COLLECT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"

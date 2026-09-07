@@ -224,6 +224,7 @@ export async function fetchIndexedCandidates(
   pacedFetcher?: typeof fetch,
 ): Promise<{
   candidates: RedditCandidate[];
+  scannedPosts: number;
   details: SourceDetails;
   commentCounts: Map<string, number>;
 }> {
@@ -235,6 +236,7 @@ export async function fetchIndexedCandidates(
   const after = String(Math.floor((nowMs - 24 * 3_600_000) / 1000));
   const before = String(Math.ceil(nowMs / 1000));
   const candidates = new Map<string, RedditCandidate>();
+  let scannedPosts = 0;
   const details: SourceDetails = {
     provider: 'Arctic Shift',
     communities: [],
@@ -259,6 +261,7 @@ export async function fetchIndexedCandidates(
         request,
       );
       details.communities.push(subreddit);
+      scannedPosts += rows.length;
       for (const row of rows) {
         const post = normalizeIndexedPost(row, keywords);
         if (
@@ -294,6 +297,7 @@ export async function fetchIndexedCandidates(
       `Arctic Shift 所有社区查询失败：${details.warnings.join(' ').slice(0, 1000)}`,
     );
   return {
+    scannedPosts,
     candidates: [...candidates.values()].map((post) => ({
       ...post,
       discussionCount: counts.get(post.id) ?? 0,

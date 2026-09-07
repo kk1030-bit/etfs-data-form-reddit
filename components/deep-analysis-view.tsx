@@ -1,6 +1,11 @@
 import { ExternalLink, FileText } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
+import {
   Card,
   CardContent,
   CardFooter,
@@ -13,6 +18,8 @@ import {
   compareDeepRecent,
   deepIsNew,
   DEEP_WINDOW_MS,
+  deepBeijingDay,
+  deepReviewSchedule,
 } from '@/lib/collector/deep-analysis-dates';
 
 const beijing = (at: string) =>
@@ -51,14 +58,41 @@ export function DeepAnalysisView({
     })
     .sort(compareDeepRecent);
   const status = data?.lastRun;
+  const candidates = (data?.candidates ?? [])
+    .filter((a) => {
+      const published = Date.parse(a.publishedAt);
+      return (
+        published >= now - DEEP_WINDOW_MS &&
+        published <= now &&
+        (!needle || `${a.title} ${a.subreddit}`.toLowerCase().includes(needle))
+      );
+    })
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        Date.parse(b.publishedAt) - Date.parse(a.publishedAt) ||
+        a.id.localeCompare(b.id),
+    )
+    .slice(0, 10);
+  const schedule = deepReviewSchedule(status, now, Boolean(data?.error));
+  const groups = [
+    ...new Set(articles.map((a) => deepBeijingDay(a.publishedAt))),
+  ].map((day) => ({
+    day,
+    articles: articles.filter((a) => deepBeijingDay(a.publishedAt) === day),
+  }));
   return (
     <section aria-label="深度分析文章" className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border py-4 text-sm text-muted-foreground">
-        <p>每日北京 08:30 审查 · 最近 7 天 · 按原帖发布时间由新到旧</p>
+        <p>每日北京 08:30 审查 · 最近 7 天 · 按北京日期分组，日内按分数</p>
         <p>
           {articles.length} 篇{needle ? '匹配文章' : '通过审查'}
         </p>
       </div>
+      <output className="block text-sm leading-6 text-muted-foreground">
+        上次审查：{schedule.lastAt ? beijing(schedule.lastAt) : '暂无记录'} ·
+        下次计划：{beijing(schedule.nextAt)}（北京） · 状态：{schedule.status}
+      </output>
       {data?.error ? (
         <output className="rounded-xl border border-amber-500/30 p-4 text-sm">
           {data.error}
@@ -82,131 +116,178 @@ export function DeepAnalysisView({
           <p className="text-base">
             {needle
               ? '没有匹配的近期分析文章'
-              : !status
-                ? '深度分析尚未完成首次每日审查'
-                : '最近 7 天暂无通过审查的分析文章'}
+              : data?.error
+                ? '暂时无法读取分析文章'
+                : !status
+                  ? '深度分析尚未完成首次每日审查'
+                  : '最近 7 天暂无通过审查的分析文章'}
           </p>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            仅展示初评分至少 {DEEP_ANALYSIS_MIN_SCORE}
-            分且通过内容审查的文章，不用旧文或未审查内容补位。
+            每日从符合资格且至少 {DEEP_ANALYSIS_MIN_SCORE}{' '}
+            分的文章中，按分数选前 5 篇审查。 论证深度、数据支撑、阅读价值各 1–5
+            分，合计至少 9 分进入精选。 待审及未通过的长文可在下方候选列表查看。
           </p>
         </div>
       ) : (
-        <div className="grid gap-5 xl:grid-cols-2">
-          {articles.map((article) => (
-            <Card
-              key={article.id}
-              className="flex h-full flex-col border-0 ring-1 ring-border"
-            >
-              <CardHeader className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-                  <span className="text-primary">r/{article.subreddit}</span>
-                  <div className="flex items-center gap-2">
-                    {deepIsNew(article.publishedAt, now) ? (
-                      <Badge>新</Badge>
-                    ) : null}
-                    <span
-                      className="tabular-nums text-muted-foreground"
-                      title="正文评分与索引讨论信号，不是收益或浏览量"
-                    >
-                      筛选分 {article.score.toFixed(1)}
-                    </span>
-                  </div>
-                </div>
-                <CardTitle className="text-xl font-medium leading-relaxed">
-                  {article.title}
-                </CardTitle>
-                <p className="text-sm leading-6 text-muted-foreground">
-                  u/{article.author}
-                  {article.authorFlair
-                    ? ` · ${article.authorFlair}（自述 flair）`
-                    : ''}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  发布于{' '}
-                  <time dateTime={article.publishedAt}>
-                    {beijing(article.publishedAt)}
-                  </time>
-                  （北京）
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  正文 {article.characters.toLocaleString('zh-CN')} 字符 · 约{' '}
-                  {article.readingMinutes} 分钟阅读
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline">
-                    一手来源 {article.primarySourceCount} 个
-                  </Badge>
-                  {article.hasTable ? (
-                    <Badge variant="outline">含数据表</Badge>
-                  ) : null}
-                  <Badge variant="outline">
-                    {article.authorLongPosts === null
-                      ? '作者长文记录暂不可用'
-                      : `作者 90 天长文 ${article.authorLongPosts} 篇`}
-                  </Badge>
-                </div>
-              </CardHeader>
-              <CardContent className="flex-1 space-y-5 text-base leading-7">
-                <div>
-                  <h3 className="mb-1 text-sm font-semibold text-primary">
-                    论点
-                  </h3>
-                  <p>{article.thesis}</p>
-                </div>
-                <div>
-                  <h3 className="mb-1 text-sm font-semibold text-primary">
-                    关键数据
-                  </h3>
-                  {article.keyData.length ? (
-                    <ul className="list-disc space-y-1 pl-5">
-                      {article.keyData.map((line, index) => (
-                        <li key={index}>{line}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-muted-foreground">
-                      原文未提供可提取的关键数据。
-                    </p>
-                  )}
-                </div>
-                <div>
-                  <h3 className="mb-1 text-sm font-semibold text-primary">
-                    反方观点
-                  </h3>
-                  <p>{article.counterpoints}</p>
-                </div>
-                {article.backgroundClaimed ? (
-                  <p className="text-sm text-muted-foreground">
-                    作者自述：{article.backgroundClaimed}
-                  </p>
-                ) : null}
-                <p className="text-sm text-muted-foreground">
-                  {article.uniqueCommenters === null
-                    ? '独立留言者计数暂不可用'
-                    : `已索引独立留言者 ${article.uniqueCommenters} 人`}{' '}
-                  · 索引可能延迟，不代表实时完整讨论量。
-                </p>
-              </CardContent>
-              <CardFooter className="mt-auto flex-col items-stretch gap-3 border-t border-border pt-5 text-sm">
-                <a
-                  href={article.permalink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex min-h-11 items-center justify-between text-primary"
-                  aria-label={`打开 Reddit 原帖：${article.title}`}
-                >
-                  阅读原帖{' '}
-                  <ExternalLink aria-hidden="true" className="size-4" />
-                </a>
-                <p className="text-muted-foreground">
-                  作者背景为自述，本站未验证
-                </p>
-              </CardFooter>
-            </Card>
+        <div className="space-y-7">
+          <h2 className="text-xl font-medium">精选</h2>
+          {groups.map((group) => (
+            <section key={group.day} aria-label={`${group.day} 深度分析`}>
+              <h2 className="mb-4 text-base font-medium">
+                {group.day}（北京） · {group.articles.length} 篇
+              </h2>
+              <div className="grid gap-5 xl:grid-cols-2">
+                {group.articles.map((article) => (
+                  <Card
+                    key={article.id}
+                    className="flex h-full flex-col border-0 ring-1 ring-border"
+                  >
+                    <CardHeader className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                        <span className="text-primary">
+                          r/{article.subreddit}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {deepIsNew(article.publishedAt, now) ? (
+                            <Badge>新</Badge>
+                          ) : null}
+                          <span
+                            className="tabular-nums text-muted-foreground"
+                            title="正文评分与索引讨论信号，不是收益或浏览量"
+                          >
+                            筛选分 {article.score.toFixed(1)}
+                          </span>
+                        </div>
+                      </div>
+                      <CardTitle className="text-xl font-medium leading-relaxed">
+                        {article.title}
+                      </CardTitle>
+                      <p className="text-sm leading-6 text-muted-foreground">
+                        u/{article.author}
+                        {article.authorFlair
+                          ? ` · ${article.authorFlair}（自述 flair）`
+                          : ''}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        发布于{' '}
+                        <time dateTime={article.publishedAt}>
+                          {beijing(article.publishedAt)}
+                        </time>
+                        （北京）
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        正文 {article.characters.toLocaleString('zh-CN')} 字符 ·
+                        约 {article.readingMinutes} 分钟阅读
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <Badge variant="outline">
+                          证据来源 {article.primarySourceCount} 个
+                        </Badge>
+                        {article.hasTable ? (
+                          <Badge variant="outline">含数据表</Badge>
+                        ) : null}
+                        <Badge variant="outline">
+                          {article.authorLongPosts === null
+                            ? '作者长文记录暂不可用'
+                            : `作者 90 天长文 ${article.authorLongPosts} 篇`}
+                        </Badge>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="flex-1 space-y-5 text-base leading-7">
+                      <div>
+                        <h3 className="mb-1 text-sm font-semibold text-primary">
+                          论点
+                        </h3>
+                        <p>{article.thesis}</p>
+                      </div>
+                      <div>
+                        <h3 className="mb-1 text-sm font-semibold text-primary">
+                          关键数据
+                        </h3>
+                        {article.keyData.length ? (
+                          <ul className="list-disc space-y-1 pl-5">
+                            {article.keyData.map((line, index) => (
+                              <li key={index}>{line}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-muted-foreground">
+                            原文未提供可提取的关键数据。
+                          </p>
+                        )}
+                      </div>
+                      <div>
+                        <h3 className="mb-1 text-sm font-semibold text-primary">
+                          反方观点
+                        </h3>
+                        <p>{article.counterpoints}</p>
+                      </div>
+                      {article.backgroundClaimed ? (
+                        <p className="text-sm text-muted-foreground">
+                          作者自述：{article.backgroundClaimed}
+                        </p>
+                      ) : null}
+                      <p className="text-sm text-muted-foreground">
+                        {article.uniqueCommenters === null
+                          ? '独立留言者计数暂不可用'
+                          : `已索引独立留言者 ${article.uniqueCommenters} 人`}{' '}
+                        · 索引可能延迟，不代表实时完整讨论量。
+                      </p>
+                    </CardContent>
+                    <CardFooter className="mt-auto flex-col items-stretch gap-3 border-t border-border pt-5 text-sm">
+                      <a
+                        href={article.permalink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex min-h-11 items-center justify-between text-primary"
+                        aria-label={`打开 Reddit 原帖：${article.title}`}
+                      >
+                        阅读原帖{' '}
+                        <ExternalLink aria-hidden="true" className="size-4" />
+                      </a>
+                      <p className="text-muted-foreground">
+                        作者背景为自述，本站未验证
+                      </p>
+                    </CardFooter>
+                  </Card>
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       )}
+      <Collapsible className="rounded-2xl border border-border">
+        <CollapsibleTrigger className="flex w-full items-center justify-between gap-4 p-5 text-left font-medium">
+          <span>候选长文 · {candidates.length} 篇</span>
+          <span className="text-sm text-muted-foreground">展开 / 收起</span>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="px-5 pb-5">
+          <p className="mb-4 text-sm text-muted-foreground">
+            近 7 天待审或未通过审查的评分前 10
+            篇；仅供观察筛选结果，不代表精选或推荐。
+          </p>
+          {candidates.length ? (
+            <ul className="divide-y divide-border">
+              {candidates.map((item) => (
+                <li key={item.id} className="py-4">
+                  <p className="leading-7">{item.title}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    r/{item.subreddit} ·{' '}
+                    {item.characters.toLocaleString('zh-CN')} 字符 ·{' '}
+                    {item.score.toFixed(1)} 分
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="py-3 text-sm text-muted-foreground">
+              {needle
+                ? '没有匹配的候选长文。'
+                : '暂无符合资格的候选长文，下一轮采集后更新。'}
+            </p>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
     </section>
   );
 }

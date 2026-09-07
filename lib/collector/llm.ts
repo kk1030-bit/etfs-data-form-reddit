@@ -16,6 +16,11 @@ export type LlmEnv = {
   WORKERS_AI_RELAY_URL?: string;
   WORKERS_AI_RELAY_TOKEN?: string;
   DB?: D1Database;
+  // Request-local observation only; never a runtime secret or global counter.
+  AI_CALLS?: { requests: number };
+  // Opt-in, request-local diagnostics. Never persist prompts or credentials here.
+  AI_TRACE?: (event: Record<string, unknown>) => void;
+  AI_BEFORE_CALL?: () => Promise<void>;
 };
 
 export type PostAnalysis = {
@@ -126,6 +131,7 @@ export function hasLlmProvider(env: LlmEnv): boolean {
 
 function parseJsonObject(text: string): Record<string, unknown> {
   const unfenced = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '');
@@ -142,15 +148,24 @@ function parseJsonObject(text: string): Record<string, unknown> {
 function workersAiText(payload: unknown): string {
   if (!payload || typeof payload !== 'object') return '';
   const choices = (
-    payload as { choices?: Array<{ message?: { content?: string } }> }
+    payload as {
+      choices?: Array<{ message?: { content?: string }; text?: string }>;
+    }
   ).choices;
   if (typeof choices?.[0]?.message?.content === 'string')
-    return choices[0].message.content
-      .replace(/<think>[\s\S]*?<\/think>/g, '')
-      .trim();
+    return choices[0].message.content;
+  // Qwen raw/non-thinking mode returns text_completion, not chat_completion.
+  if (typeof choices?.[0]?.text === 'string') return choices[0].text;
   if (typeof (payload as { response?: unknown }).response === 'string') {
     return (payload as { response: string }).response;
   }
+  const structured = (payload as { response?: unknown }).response;
+  if (
+    structured &&
+    typeof structured === 'object' &&
+    !Array.isArray(structured)
+  )
+    return JSON.stringify(structured);
   const result = (payload as { result?: unknown }).result;
   if (
     result &&
@@ -159,7 +174,28 @@ function workersAiText(payload: unknown): string {
   ) {
     return (result as { response: string }).response;
   }
+  if (result && typeof result === 'object') {
+    const nested = (result as { response?: unknown }).response;
+    if (nested && typeof nested === 'object' && !Array.isArray(nested))
+      return JSON.stringify(nested);
+  }
   return '';
+}
+
+async function aiHttpPayload(
+  response: Response,
+  env: LlmEnv,
+  diagnostic: boolean,
+): Promise<unknown> {
+  if (!diagnostic) return response.json();
+  const raw = await response.text();
+  env.AI_TRACE?.({
+    event: 'raw_response',
+    status: response.status,
+    raw: raw.slice(0, 64000),
+    truncatedLog: raw.length > 64000,
+  });
+  return JSON.parse(raw) as unknown;
 }
 
 async function workersAiStructuredResponse(
@@ -178,7 +214,7 @@ async function workersAiStructuredResponse(
       },
       { role: 'user', content: `${input}\n/no_think` },
     ],
-    max_tokens: purpose ? 1500 : 1000,
+    max_tokens: purpose ? 2000 : 1000,
     temperature: 0.1,
   };
   let payload: unknown;
@@ -196,12 +232,14 @@ async function workersAiStructuredResponse(
         .length > (purpose ? 18000 : 6000)
     )
       throw new Error('AI input exceeds free-budget limit');
+    await env.AI_BEFORE_CALL?.();
     const reserved =
       await env.DB.prepare(`INSERT INTO ai_daily_usage (day, requests) VALUES (?1, 1)
       ON CONFLICT(day) DO UPDATE SET requests = requests + 1 WHERE requests < 128`)
         .bind(new Date().toISOString().slice(0, 10))
         .run();
     if (!reserved.meta.changes) throw new Error('Daily free AI budget reached');
+    if (env.AI_CALLS) env.AI_CALLS.requests++;
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -212,17 +250,33 @@ async function workersAiStructuredResponse(
       redirect: 'manual',
       signal: AbortSignal.timeout(60_000),
     });
+    if (purpose && !response.ok)
+      env.AI_TRACE?.({
+        event: 'http_error',
+        status: response.status,
+        raw: (await response.clone().text()).slice(0, 64000),
+      });
     if (!response.ok)
       throw new Error(`Free AI service HTTP ${response.status}`);
-    payload = await response.json();
+    payload = await aiHttpPayload(response, env, Boolean(purpose));
   } else if (env.AI) {
+    if (env.AI_CALLS) env.AI_CALLS.requests++;
     payload = await env.AI.run(model, request);
+    if (purpose) {
+      const raw = JSON.stringify(payload) ?? '';
+      env.AI_TRACE?.({
+        event: 'raw_response',
+        raw: raw.slice(0, 64000),
+        truncatedLog: raw.length > 64000,
+      });
+    }
   } else {
     const accountId = env.WORKERS_AI_ACCOUNT_ID?.trim() ?? '';
     const token = env.WORKERS_AI_API_TOKEN?.trim() ?? '';
     if (!/^[a-f0-9]{32}$/i.test(accountId) || !token) {
       throw new Error('Workers AI REST 凭证未完整配置');
     }
+    if (env.AI_CALLS) env.AI_CALLS.requests++;
     const response = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
       {
@@ -239,14 +293,20 @@ async function workersAiStructuredResponse(
       const detail = (await response.text()).slice(0, 500);
       throw new Error(`Workers AI REST ${response.status}: ${detail}`);
     }
-    payload = await response.json();
+    payload = await aiHttpPayload(response, env, Boolean(purpose));
   }
   const text = workersAiText(payload);
+  if (purpose) {
+    const finish = (payload as { choices?: Array<{ finish_reason?: string }> })
+      ?.choices?.[0]?.finish_reason;
+    if (finish === 'length')
+      throw new Error('AI output truncated (finish_reason=length)');
+  }
   if (!text) throw new Error('Workers AI returned no output text');
   return parseJsonObject(text);
 }
 
-/** One provider call per deep article; never silently retry with a paid fallback. */
+/** A single attempt. Deep review owns its bounded retry; never switches paid providers. */
 export async function deepStructuredResponse(
   env: LlmEnv,
   schema: object,
@@ -283,6 +343,7 @@ async function openAiStructuredResponse(
   input: string,
 ): Promise<Record<string, unknown> | null> {
   if (!env.OPENAI_API_KEY) return null;
+  if (env.AI_CALLS) env.AI_CALLS.requests++;
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
@@ -294,7 +355,7 @@ async function openAiStructuredResponse(
       store: false,
       instructions,
       input,
-      max_output_tokens: 2_500,
+      max_output_tokens: name === 'reddit_deep_analysis' ? 2000 : 2500,
       text: {
         format: {
           type: 'json_schema',
@@ -311,9 +372,18 @@ async function openAiStructuredResponse(
     const detail = (await response.text()).slice(0, 500);
     throw new Error(`OpenAI Responses API ${response.status}: ${detail}`);
   }
-  const text = responseText(await response.json());
+  const payload = await aiHttpPayload(
+    response,
+    env,
+    name === 'reddit_deep_analysis',
+  );
+  if (name === 'reddit_deep_analysis') {
+    if ((payload as { status?: string })?.status === 'incomplete')
+      throw new Error('AI output truncated (incomplete)');
+  }
+  const text = responseText(payload);
   if (!text) throw new Error('OpenAI Responses API returned no output text');
-  const parsed = JSON.parse(text) as unknown;
+  const parsed = parseJsonObject(text);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('OpenAI structured response was not an object');
   }

@@ -1,4 +1,5 @@
 import { inspectSiteJobResponse } from './cron-result.ts';
+import { qwenNonThinkingPrompt } from './qwen-prompt.ts';
 
 type CronEnv = {
   SITE_BASE_URL: string;
@@ -87,12 +88,15 @@ export default {
           ).length > (deep ? 18000 : 6000)
         )
           return json({ error: 'Input exceeds free-budget limit' }, 413);
+        const messages = input.messages as Array<{
+          role: 'system' | 'user';
+          content: string;
+        }>;
         const result = await env.AI.run('@cf/qwen/qwen3-30b-a3b-fp8', {
-          messages: input.messages as Array<{
-            role: 'system' | 'user';
-            content: string;
-          }>,
-          max_tokens: deep ? 1500 : 1000,
+          ...(deep
+            ? { prompt: qwenNonThinkingPrompt(messages), raw: true }
+            : { messages }),
+          max_tokens: deep ? 2000 : 1000,
           temperature: 0.1,
         });
         return json(result);

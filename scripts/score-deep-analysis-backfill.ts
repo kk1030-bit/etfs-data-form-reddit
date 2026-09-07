@@ -12,7 +12,9 @@ import {
 } from '../lib/collector/deep-analysis-dates.ts';
 
 const directory = new URL(
-  '../outputs/deep-analysis-backfill/',
+  process.argv.includes('--review')
+    ? '../outputs/deep-analysis-ops-review/'
+    : '../outputs/deep-analysis-backfill/',
   import.meta.url,
 );
 const data = JSON.parse(
@@ -29,7 +31,7 @@ const rejected: Record<string, number> = {};
 // Approved by the user after inspecting the first flair-frequency audit.
 const scored = data.posts.map((post) => ({
   post,
-  result: scoreDeepAnalysis(post, 'reject-matched'),
+  result: scoreDeepAnalysis(post),
 }));
 for (const { result } of scored)
   for (const reason of result.rejectionReasons)
@@ -54,6 +56,22 @@ const top20 = eligible.slice(0, 20).map(({ post, result }, index) => ({
   ...result,
 }));
 const reviewedAt = Date.now();
+const windowComparison = [30 * 24, 7 * 24, 72].map((hours) => {
+  const rows = scored.filter(({ post }) => {
+    const published = Number(post.created_utc) * 1000;
+    return published <= reviewedAt && published >= reviewedAt - hours * 3600000;
+  });
+  return {
+    hours,
+    returned: rows.length,
+    eligible: rows.filter(({ result }) => result.eligible).length,
+    passed35: rows.filter(({ result }) => result.eligible && result.score >= 35)
+      .length,
+    passed20: rows.filter(({ result }) => result.finalist).length,
+    passed55: rows.filter(({ result }) => result.eligible && result.score >= 55)
+      .length,
+  };
+});
 const recentFinalists = eligible
   .filter(
     ({ post, result }) =>
@@ -72,11 +90,11 @@ const report = {
   fetchedAt: data.fetchedAt,
   scoredAt: new Date().toISOString(),
   requests: data.requests,
-  policy: 'reject-matched',
+  policy: 'observe-only; reddit-depth-v2',
   scoreStage: 'base-only; no commenter/author bonus and no AI',
   minimumBaseScore: DEEP_ANALYSIS_MIN_SCORE,
   formula:
-    'Structure: each type 5 (max 15); density: each number per 1000 characters 1 (max 15); topic: each distinct ticker/macro term 1 (max 10)',
+    'Length: 10/18/25 at 1000/2000/3500; structure: 4 each capped15; density: min(20,5*log2(1+density)); evidence:5 each capped15; topic:min(15,3*log2(1+distinct terms)); no flair or history bonus',
   whitelist: {
     etfs: DEEP_ETF_TICKERS.size,
     bogleheadsFunds: BOGLEHEADS_FUND_TICKERS.size,
@@ -88,6 +106,7 @@ const report = {
   coverage: data.communities,
   top20,
   recentFinalists,
+  windowComparison,
 };
 await writeFile(
   new URL('scoring-report.json', directory),
@@ -99,16 +118,25 @@ const cell = (value: string | number) =>
     .replace(/[\r\n]/g, ' ')
     .replace(/[|<>[\]`]/g, ' ');
 const markdown = [
-  '# 深度分析：首次回填评分',
+  '# 深度分析：新版评分校准报告（非 AI 结果）',
   '',
   `采集于 ${data.fetchedAt}；仅 ${data.requests} 个回填请求。`,
-  `取得 ${report.collected} 篇，通过正文与 flair 闸门 ${report.eligible} 篇，初评分 ≥${DEEP_ANALYSIS_MIN_SCORE} 共 ${report.finalists} 篇。`,
-  `下表为通过闸门的前 20 名；低于 ${DEEP_ANALYSIS_MIN_SCORE} 分者不进入决赛圈。不含独立留言者／作者历史加分，未运行 AI。`,
+  `取得 ${report.collected} 篇，通过自发文／长度／主题资格 ${report.eligible} 篇，达到 ${DEEP_ANALYSIS_MIN_SCORE} 分地板共 ${report.finalists} 篇。`,
+  `下表为初评分前 20 名。生产任务对初评前 10 查询互动后选前 5 送 AI；此处无互动补分、无 AI，不代表已通过审查。`,
   'limit=auto 不保证穷尽过去 30 天；正文仅用于本地评分，未进入网站、D1 或 AI。',
+  '',
+  '## 同一回填样本：视窗与门槛对照（未去重、未运行 AI）',
+  '',
+  '| 视窗 | 返回篇数 | 通过资格 | ≥20 | ≥35（旧门槛对照） | ≥55（旧门槛对照） |',
+  '| --- | ---: | ---: | ---: | ---: | ---: |',
+  ...windowComparison.map(
+    (w) =>
+      `| ${w.hours} 小时 | ${w.returned} | ${w.eligible} | ${w.passed20} | ${w.passed35} | ${w.passed55} |`,
+  ),
   '',
   `## 新增日期规则复核（截至 ${new Date(reviewedAt).toISOString()}）`,
   '',
-  `发布在最近 7 天且初评分 ≥${DEEP_ANALYSIS_MIN_SCORE}：${recentFinalists.length} 篇。按原帖发布时间由新到旧，不以抓取时间代替。仍未运行 AI。`,
+  `发布在最近 7 天且初评分 ≥${DEEP_ANALYSIS_MIN_SCORE}：${recentFinalists.length} 篇。按北京发布日期分组、日内按分数，不以抓取时间代替。仍未运行 AI。`,
   ...recentFinalists.map(
     (p) =>
       `- ${p.publishedAt} · ${p.score} 分 · [${cell(p.title)}](${p.permalink})`,

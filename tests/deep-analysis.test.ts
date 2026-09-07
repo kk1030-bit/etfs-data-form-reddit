@@ -27,29 +27,23 @@ function post(overrides: Partial<DeepPost> = {}): DeepPost {
     ...overrides,
   };
 }
-const score = (item: DeepPost) => scoreDeepAnalysis(item, 'reject-matched');
+const score = (item: DeepPost) => scoreDeepAnalysis(item);
 
-void test('approved base threshold admits exactly 35 but not 34.99', () => {
+void test('relative queue floor admits exactly 20, never waives the minimum length', () => {
   const accepted = score(
     post({
-      selftext:
-        '# Research\nVOO VTI VXUS BND QQQ\n| A | B |\n| --- | --- |\n'.padEnd(
-          1500,
-          'x',
-        ),
+      selftext: '# Research\nVOO VTI BND\n'.padEnd(1000, 'x'),
     }),
   );
-  assert.equal(accepted.score, 35);
+  assert.equal(accepted.score, 20);
   assert.equal(accepted.finalist, true);
-  const below = score(
-    post({ selftext: 'VOO VTI BND QQQ 1 2 3 '.padEnd(3030, 'x') }),
-  );
-  assert.equal(below.score, 34.99);
+  const below = score(post({ selftext: 'VOO VTI '.padEnd(1000, 'x') }));
+  assert.ok(below.score < 20);
   assert.equal(below.eligible, true);
   assert.equal(below.finalist, false);
 });
 
-void test('lower base threshold does not waive penalties or rejection gates', () => {
+void test('short questions lose five and help loses ten; flair no longer vetoes eligible prose', () => {
   const item = post({
     selftext:
       '# Research\nVOO VTI VXUS BND QQQ\n| A | B |\n| --- | --- |\n'.padEnd(
@@ -58,13 +52,13 @@ void test('lower base threshold does not waive penalties or rejection gates', ()
       ),
   });
   const penalized = score({ ...item, title: 'Should I get advice?' });
-  assert.equal(penalized.points.questionPenalty, -15);
-  assert.equal(penalized.points.helpPenalty, -20);
+  assert.equal(penalized.points.questionPenalty, -5);
+  assert.equal(penalized.points.helpPenalty, -10);
   assert.equal(penalized.finalist, false);
   const rejected = score({ ...item, link_flair_text: 'Portfolio Review' });
-  assert.equal(rejected.score, 35);
-  assert.equal(rejected.finalist, false);
-  assert.ok(rejected.rejectionReasons.includes('rejected_flair'));
+  assert.equal(rejected.finalist, true);
+  assert.equal(rejected.flairDecision, 'rejected');
+  assert.ok(!rejected.rejectionReasons.includes('rejected_flair'));
 });
 
 void test('the topic gate uses body-only whole uppercase fund symbols or three distinct macro terms', () => {
@@ -86,11 +80,17 @@ void test('the topic gate uses body-only whole uppercase fund symbols or three d
     false,
   );
   assert.equal(
-    score(post({ selftext: 'Comparing VOO with VTI and VXUS' })).eligible,
+    score(
+      post({ selftext: 'Comparing VOO with VTI and VXUS '.padEnd(1000, 'x') }),
+    ).eligible,
     true,
   );
   assert.equal(
-    score(post({ selftext: 'The Fed discussed CPI and inflation' })).eligible,
+    score(
+      post({
+        selftext: 'The Fed discussed CPI and inflation '.padEnd(1000, 'x'),
+      }),
+    ).eligible,
     true,
   );
   assert.equal(score(post({ selftext: 'Fed Fed Fed' })).eligible, false);
@@ -105,7 +105,8 @@ void test('the topic gate uses body-only whole uppercase fund symbols or three d
 
 void test('Bogleheads includes mutual funds without treating them as ETF symbols everywhere', () => {
   assert.equal(
-    score(post({ selftext: 'VTSAX versus VFIAX and FSKAX' })).eligible,
+    score(post({ selftext: 'VTSAX versus VFIAX and FSKAX '.padEnd(1000, 'x') }))
+      .eligible,
     true,
   );
   assert.equal(
@@ -157,14 +158,14 @@ void test('single-stock dollar tickers are blocked, dollars and whitelisted fund
     score(
       post({
         link_flair_text: 'Company Analysis',
-        selftext: 'Fed inflation duration',
+        selftext: 'Fed inflation duration '.padEnd(1000, 'x'),
       }),
     ).eligible,
     true,
   );
 });
 
-void test('approved flair rule rejects matching regexes, leaving missing/HFEA/US labels to body scoring', () => {
+void test('flair frequency classification is preserved but all non-stock labels proceed to body scoring', () => {
   for (const flair of [
     'Investing Questions',
     'Portfolio Review',
@@ -172,7 +173,7 @@ void test('approved flair rule rejects matching regexes, leaving missing/HFEA/US
     'Help',
     'Rate my allocation',
   ])
-    assert.equal(score(post({ link_flair_text: flair })).eligible, false);
+    assert.equal(score(post({ link_flair_text: flair })).eligible, true);
   for (const flair of [
     null,
     '',
@@ -203,12 +204,13 @@ void test('approved flair rule rejects matching regexes, leaving missing/HFEA/US
 
 void test('body-length bands use characters, including unicode, without clipping text', () => {
   for (const [length, expected] of [
-    [1499, 0],
-    [1500, 20],
-    [2999, 20],
-    [3000, 30],
-    [6000, 30],
-    [6001, 35],
+    [999, 0],
+    [1000, 10],
+    [1999, 10],
+    [2000, 18],
+    [3499, 18],
+    [3500, 25],
+    [6001, 25],
   ]) {
     const result = score(post({ selftext: 'VOO ' + '文'.repeat(length - 4) }));
     assert.equal(result.details.characters, length);
@@ -217,11 +219,11 @@ void test('body-length bands use characters, including unicode, without clipping
   assert.equal(score(post({ selftext: 'VOO 😀' })).details.characters, 5);
 });
 
-void test('each markdown structure contributes five once, up to fifteen', () => {
+void test('four markdown structures contribute four each, capped at fifteen', () => {
   const result = score(
     post({
       selftext:
-        '# VOO analysis\n## More\n\n| ETF | Fee |\n| --- | ---: |\n| VOO | 0.03% |\n\n1. Allocation\n2. Risk',
+        '# VOO analysis\n## More\n\n| ETF | Fee |\n| --- | ---: |\n| VOO | 0.03% |\n\n1. Allocation\n2. **Risk**',
     }),
   );
   assert.equal(result.points.structure, 15);
@@ -229,6 +231,7 @@ void test('each markdown structure contributes five once, up to fifteen', () => 
     headings: true,
     table: true,
     numberedList: true,
+    bold: true,
   });
   assert.equal(
     score(post({ selftext: 'VOO\n```\n# Example heading\n1. Example\n```' }))
@@ -237,20 +240,20 @@ void test('each markdown structure contributes five once, up to fifteen', () => 
   );
 });
 
-void test('density counts percentages once, uses per-thousand denominator and caps at fifteen', () => {
+void test('density counts percentages once with logarithmic saturation at twenty', () => {
   const head = 'VOO 10% 20 1,000 3.5% ';
   const result = score(
     post({ selftext: head + 'x'.repeat(1000 - head.length) }),
   );
   assert.equal(result.details.numberCount, 4);
-  assert.equal(result.points.dataDensity, 4);
+  assert.equal(result.points.dataDensity, 5 * Math.log2(5));
   const second = score(
     post({ selftext: head + 'x'.repeat(2000 - head.length) }),
   );
-  assert.equal(second.points.dataDensity, 2);
+  assert.equal(second.points.dataDensity, 5 * Math.log2(3));
   assert.equal(
     score(post({ selftext: 'VOO ' + '10% '.repeat(100) })).points.dataDensity,
-    15,
+    20,
   );
   assert.equal(
     score(post({ selftext: 'VOO https://example.org/2026/123456789' })).details
@@ -294,10 +297,10 @@ void test('topic points count distinct terms; self-reported flair and question/h
       author_flair_text: 'CFA, CPA, Quant analyst',
     }),
   );
-  assert.equal(result.points.topic, 4);
-  assert.equal(result.points.authorFlair, 5);
-  assert.equal(result.points.questionPenalty, -15);
-  assert.equal(result.points.helpPenalty, -20);
+  assert.equal(result.points.topic, 3 * Math.log2(5));
+  assert.equal(result.points.authorFlair, 0);
+  assert.equal(result.points.questionPenalty, -5);
+  assert.equal(result.points.helpPenalty, -10);
   assert.equal(result.score, 0);
   const good = score(
     post({
@@ -308,7 +311,7 @@ void test('topic points count distinct terms; self-reported flair and question/h
       author_flair_text: 'PM',
     }),
   );
-  assert.equal(good.score, 95);
+  assert.ok(good.score <= 90);
   assert.equal(good.finalist, true);
 });
 
