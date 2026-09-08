@@ -259,6 +259,27 @@ export const schedulerChecks = sqliteTable(
 );
 
 // Deep analysis retains derived cards for seven days, never article/comment bodies.
+export const deepAnalysisSchedulerChecks = sqliteTable(
+  'deep_analysis_scheduler_checks',
+  {
+    day: text('day').primaryKey(),
+    checkedAtUtc: text('checked_at_utc').notNull(),
+    status: text('status').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    lastDispatchAtUtc: text('last_dispatch_at_utc'),
+    nextCheckAtUtc: text('next_check_at_utc'),
+    error: text('error'),
+    leaseToken: text('lease_token'),
+    leaseUntilUtc: text('lease_until_utc'),
+  },
+  (t) => [
+    check(
+      'chk_deep_scheduler_attempts',
+      sql`${t.attempts} >= 0 AND ${t.attempts} <= 2`,
+    ),
+  ],
+);
+
 export const deepAnalysisArticles = sqliteTable(
   'deep_analysis_articles',
   {

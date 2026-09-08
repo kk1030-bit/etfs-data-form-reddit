@@ -53,6 +53,10 @@ import {
   ensureHourlyCollection,
   type SchedulerCheck,
 } from './scheduler-watchdog.ts';
+import {
+  ensureDeepAnalysis,
+  type DeepSchedulerCheck,
+} from './deep-analysis-watchdog.ts';
 
 export type CollectorEnv = RedditEnv &
   LlmEnv & {
@@ -90,6 +94,7 @@ export type JobResult = {
   upstreamStatus?: number;
   reason?: string;
   scheduler?: SchedulerCheck;
+  deepScheduler?: DeepSchedulerCheck;
 };
 
 function errorMessage(error: unknown): string {
@@ -750,7 +755,10 @@ export async function runHourly(
     env.ARCTIC_SHIFT_EXTERNAL === '1' &&
     !externalArctic
   ) {
-    const scheduler = await ensureHourlyCollection(env, scheduledAtMs);
+    const [scheduler, deepScheduler] = await Promise.all([
+      ensureHourlyCollection(env, scheduledAtMs),
+      ensureDeepAnalysis(env, scheduledAtMs),
+    ]);
     return {
       status: 'skipped',
       kind: 'hourly',
@@ -758,6 +766,7 @@ export async function runHourly(
       sourceMode,
       reason: 'github_actions_collector',
       scheduler,
+      deepScheduler,
     };
   }
   const retentionHours = clampRawRetentionHours(

@@ -70,3 +70,32 @@ void test('Cron preserves successful report/handled-cooldown outcomes and reject
     );
   }
 });
+
+void test('Cron reports deep dispatch separately and surfaces deep failures even if hourly is complete', async () => {
+  const logs: unknown[] = [];
+  await inspectSiteJobResponse(
+    Response.json({
+      status: 'skipped',
+      scheduler: { status: 'completed' },
+      deepScheduler: { status: 'dispatched', attempts: 1, error: 'do-not-log' },
+    }),
+    'hourly',
+    (value) => logs.push(value),
+  );
+  assert.match(JSON.stringify(logs), /deepSchedulerStatus/);
+  assert.match(JSON.stringify(logs), /dispatched/);
+  assert.ok(!JSON.stringify(logs).includes('do-not-log'));
+  for (const status of ['failed', 'unconfigured', 'exhausted'])
+    await assert.rejects(
+      inspectSiteJobResponse(
+        Response.json({
+          status: 'skipped',
+          scheduler: { status: 'completed' },
+          deepScheduler: { status },
+        }),
+        'hourly',
+        () => {},
+      ),
+      /Deep analysis scheduler needs attention/,
+    );
+});

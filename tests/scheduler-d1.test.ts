@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { test } from 'node:test';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { ensureHourlyCollection } from '../lib/collector/scheduler-watchdog.ts';
+import { ensureDeepAnalysis } from '../lib/collector/deep-analysis-watchdog.ts';
 
 // Node SQLite does not enforce all production D1 limits. In particular, the
 // old seven-way UNION ALL passed those tests but failed on workerd's D1.
@@ -76,4 +77,24 @@ void test('watchdog barriers and atomic reservation work with Cloudflare D1', as
   assert.equal((await check(110)).status, 'running');
   assert.equal((await check(116)).status, 'dispatched');
   assert.equal(posts, 2);
+  const deepEnv = {
+    DB: db as unknown as D1Database,
+    GITHUB_ACTIONS_TOKEN: 'test-only-token',
+  };
+  assert.equal(
+    (await ensureDeepAnalysis(deepEnv, at(116), fetcher, () => at(116))).status,
+    'dispatched',
+  );
+  assert.equal(posts, 3);
+  await db
+    .prepare(
+      "INSERT INTO deep_analysis_runs(day, token, status, started_at_utc) VALUES (?1, ?2, 'completed', ?3)",
+    )
+    .bind('2026-09-07', 'deep-test', iso(116))
+    .run();
+  assert.equal(
+    (await ensureDeepAnalysis(deepEnv, at(150), fetcher, () => at(150))).status,
+    'completed',
+  );
+  assert.equal(posts, 3);
 });

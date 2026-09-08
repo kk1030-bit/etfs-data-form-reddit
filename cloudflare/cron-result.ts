@@ -14,6 +14,7 @@ export async function inspectSiteJobResponse(
     status?: string;
     logicalTimeUtc?: string;
     scheduler?: { status?: string; attempts?: number; checkedAt?: string };
+    deepScheduler?: { status?: string; attempts?: number };
   };
   try {
     result = await response.json();
@@ -42,6 +43,20 @@ export async function inspectSiteJobResponse(
     ].includes(schedulerStatus)
       ? schedulerStatus
       : undefined;
+  const deepStatus = result.deepScheduler?.status;
+  const safeDeepStatus =
+    deepStatus &&
+    [
+      'waiting',
+      'dispatched',
+      'running',
+      'completed',
+      'failed',
+      'unconfigured',
+      'exhausted',
+    ].includes(deepStatus)
+      ? deepStatus
+      : undefined;
   log({
     event: 'site_job_checked',
     kind,
@@ -50,6 +65,14 @@ export async function inspectSiteJobResponse(
     dispatchAttempts: Number.isInteger(result.scheduler?.attempts)
       ? result.scheduler?.attempts
       : undefined,
+    ...(result.deepScheduler
+      ? {
+          deepSchedulerStatus: safeDeepStatus,
+          deepDispatchAttempts: Number.isInteger(result.deepScheduler.attempts)
+            ? result.deepScheduler.attempts
+            : undefined,
+        }
+      : {}),
   });
   if (
     safeSchedulerStatus &&
@@ -57,4 +80,11 @@ export async function inspectSiteJobResponse(
   ) {
     throw new Error(`Hourly scheduler needs attention: ${safeSchedulerStatus}`);
   }
+  if (
+    safeDeepStatus &&
+    ['failed', 'unconfigured', 'exhausted'].includes(safeDeepStatus)
+  )
+    throw new Error(
+      `Deep analysis scheduler needs attention: ${safeDeepStatus}`,
+    );
 }

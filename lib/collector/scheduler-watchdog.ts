@@ -6,9 +6,12 @@ const RETRY_MS = 20 * MINUTE_MS;
 const LEASE_MS = 90_000;
 const MAX_EVENT_LAG_MS = 5 * MINUTE_MS;
 const GITHUB_TIMEOUT_MS = 8_000;
-const WORKFLOW_URL =
-  'https://api.github.com/repos/kk1030-bit/etfs-data-form-reddit/actions/workflows/title-index.yml';
-const ACTIVE_STATUSES = [
+const WORKFLOW_URLS = {
+  hourly:
+    'https://api.github.com/repos/kk1030-bit/etfs-data-form-reddit/actions/workflows/title-index.yml',
+  deep: 'https://api.github.com/repos/kk1030-bit/etfs-data-form-reddit/actions/workflows/deep-analysis.yml',
+} as const;
+export const ACTIVE_STATUSES = [
   'queued',
   'in_progress',
   'waiting',
@@ -121,7 +124,7 @@ async function collectionBarrier(db: D1Database, hour: string, nowMs: number) {
     .first<{ status: 'completed' | 'cooldown' | 'running' }>();
 }
 
-class GitHubRequestError extends Error {
+export class GitHubRequestError extends Error {
   readonly code: string;
   constructor(code: string) {
     super(code);
@@ -129,11 +132,12 @@ class GitHubRequestError extends Error {
   }
 }
 
-async function githubRequest(
+export async function githubRequest(
   token: string,
   fetcher: typeof fetch,
   operation: 'runs' | 'dispatch',
   status?: (typeof ACTIVE_STATUSES)[number],
+  workflow: keyof typeof WORKFLOW_URLS = 'hourly',
 ): Promise<boolean> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -150,8 +154,8 @@ async function githubRequest(
       (async () => {
         const response = await fetcher(
           operation === 'dispatch'
-            ? `${WORKFLOW_URL}/dispatches`
-            : `${WORKFLOW_URL}/runs?status=${status}&per_page=1`,
+            ? `${WORKFLOW_URLS[workflow]}/dispatches`
+            : `${WORKFLOW_URLS[workflow]}/runs?status=${status}&per_page=1`,
           {
             method: operation === 'dispatch' ? 'POST' : 'GET',
             redirect: 'manual',
@@ -160,8 +164,7 @@ async function githubRequest(
               Authorization: `Bearer ${token}`,
               Accept: 'application/vnd.github+json',
               'X-GitHub-Api-Version': '2026-03-10',
-              'User-Agent':
-                'etfs-hourly-watchdog (github.com/kk1030-bit/etfs-data-form-reddit)',
+              'User-Agent': `etfs-${workflow}-watchdog (github.com/kk1030-bit/etfs-data-form-reddit)`,
               ...(operation === 'dispatch'
                 ? { 'Content-Type': 'application/json' }
                 : {}),
