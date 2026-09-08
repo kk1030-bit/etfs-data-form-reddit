@@ -40,7 +40,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { LeadTopics } from '@/components/lead-topics';
 import { DeepAnalysisView } from '@/components/deep-analysis-view';
-import { defaultDeepView } from '@/lib/collector/deep-analysis-dates';
 import { commentMetricLabel, commentGrowthLabel } from '@/lib/comment-metric';
 import {
   hourlyCollectionHistory,
@@ -332,12 +331,7 @@ function ReportsView({
 
 export function DashboardApp({ initialData }: { initialData: DashboardData }) {
   const [data, setData] = useState(initialData);
-  const [view, setView] = useState<ViewId>(() =>
-    defaultDeepView(
-      initialData.deepAnalysis?.articles,
-      Date.parse(initialData.checkedAt),
-    ),
-  );
+  const [view, setView] = useState<ViewId>('deep');
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);

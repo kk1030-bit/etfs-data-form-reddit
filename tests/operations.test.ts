@@ -4,7 +4,6 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  defaultDeepView,
   compareDeepRecent,
   deepReviewSchedule,
 } from '../lib/collector/deep-analysis-dates.ts';
@@ -114,36 +113,13 @@ void test('operations view never hides the hourly history when the record array 
   assert.match(source, /近 24 小时实际采集记录/);
 });
 
-void test('landing view needs three distinct valid articles inside the rolling seven-day window', () => {
-  const articles = [0, 1, 2].map((i) => ({
-    id: String(i),
-    publishedAt: iso(now - i * 3600000),
-  }));
-  assert.equal(defaultDeepView(articles.slice(0, 2), now), 'top');
-  assert.equal(defaultDeepView(articles, now), 'deep');
-  assert.equal(
-    defaultDeepView([articles[0], articles[0], articles[1]], now),
-    'top',
+void test('landing view always starts at deep analysis regardless of article count', async () => {
+  const source = await readFile(
+    new URL('../components/dashboard-app.tsx', import.meta.url),
+    'utf8',
   );
-  assert.equal(
-    defaultDeepView(
-      [
-        articles[0],
-        articles[1],
-        { id: 'old', publishedAt: iso(now - 7 * 86400000 - 1) },
-      ],
-      now,
-    ),
-    'top',
-  );
-  assert.equal(
-    defaultDeepView(
-      [articles[0], articles[1], { id: 'future', publishedAt: iso(now + 1) }],
-      now,
-    ),
-    'top',
-  );
-  assert.equal(defaultDeepView(undefined, now), 'top');
+  assert.match(source, /const \[view, setView\] = useState<ViewId>\('deep'\)/);
+  assert.doesNotMatch(source, /defaultDeepView/);
 });
 
 void test('a lower score on a newer Beijing date wins; same-day high scores precede newer low scores', () => {

@@ -28,21 +28,6 @@ export function compareDeepRecent(
   );
 }
 
-export function defaultDeepView(
-  articles: Array<{ publishedAt: string; id: string }> | undefined,
-  now: number,
-): 'deep' | 'top' {
-  const recent = new Set(
-    (articles ?? [])
-      .filter((a) => {
-        const at = Date.parse(a.publishedAt);
-        return Number.isFinite(at) && at <= now && at >= now - DEEP_WINDOW_MS;
-      })
-      .map((a) => a.id),
-  );
-  return recent.size >= 3 ? 'deep' : 'top';
-}
-
 export function deepReviewSchedule(
   run:
     | {
