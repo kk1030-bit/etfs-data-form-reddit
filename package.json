@@ -8,10 +8,12 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "deploy": "wrangler deploy --config dist/server/wrangler.json",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/core.test.ts tests/collector-status.test.ts tests/arctic-shift.test.ts tests/title-fallback.test.ts tests/scheduler-watchdog.test.ts tests/scheduler-status.test.ts tests/cron-result.test.ts tests/scheduler-d1.test.ts tests/etf-ranking.test.ts tests/deep-analysis.test.ts tests/deep-analysis-pipeline.test.ts tests/deep-analysis-v2.test.ts tests/deep-analysis-watchdog.test.ts tests/operations.test.ts",
-    "db:local": "wrangler d1 migrations apply site-creator-d1 --local --config wrangler.local.jsonc",
+    "test": "node --test tests/core.test.ts tests/collector-status.test.ts tests/arctic-shift.test.ts tests/title-fallback.test.ts tests/scheduler-watchdog.test.ts tests/scheduler-status.test.ts tests/cron-result.test.ts tests/scheduler-d1.test.ts tests/etf-ranking.test.ts tests/deep-analysis.test.ts tests/deep-analysis-pipeline.test.ts tests/deep-analysis-v2.test.ts tests/deep-analysis-watchdog.test.ts tests/operations.test.ts tests/cloudflare-migration.test.ts",
+    "db:local": "wrangler d1 migrations apply DB --local --config wrangler.jsonc",
+    "db:remote": "wrangler d1 migrations apply DB --remote --config wrangler.jsonc",
     "collector:dev": "wrangler dev --config cloudflare/wrangler.collector.jsonc --test-scheduled",
     "collector:deploy": "wrangler deploy --config cloudflare/wrangler.collector.jsonc",
     "lint": "oxlint",
@@ -43,7 +45,6 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.54.3",
     "@cloudflare/workers-types": "5.20260902.1",
-    "@openai/sites-vite-plugin": "0.2.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

@@ -1,6 +1,7 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "etfs-hot-topics-collector",
+  "account_id": "1a333a7fc271695b4531e55fe03339d6",
   "main": "collector-worker.ts",
   "compatibility_date": "2026-09-02",
   "workers_dev": true,
@@ -14,6 +15,6 @@
     "crons": ["0,25,50 * * * *", "0 16 * * *", "10 16 * * SUN"],
   },
   "vars": {
-    "SITE_BASE_URL": "https://etfs-hot-topics.wangguancc.chatgpt.site",
+    "SITE_BASE_URL": "https://etfs-hot-topics.etfs-hot-topics-kk1030.workers.dev",
   },
 }

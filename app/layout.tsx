@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono, Noto_Sans_SC } from 'next/font/google';
+import { env } from 'cloudflare:workers';
+import { siteOrigin } from '@/lib/site-config.mjs';
 import './globals.css';
 
 const geistSans = Geist({
@@ -21,7 +23,7 @@ const notoSans = Noto_Sans_SC({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000',
+    siteOrigin((env as { SITE_BASE_URL?: string }).SITE_BASE_URL),
   ),
   title: 'etfs热门话题｜Reddit ETF 情报台',
   description:

@@ -1,12 +1,14 @@
-const site =
-  'https://etfs-hot-topics.wangguancc.chatgpt.site/api/internal/title-index';
+import { siteEndpoint } from '../lib/site-config.mjs';
+const site = siteEndpoint(
+  '/api/internal/title-index',
+  process.env.SITE_BASE_URL,
+);
 const feed =
   'https://news.google.com/rss/search?q=site%3Areddit.com%2Fr%2FETFs%20when%3A2d&hl=en-US&gl=US&ceid=US%3Aen';
-if (!process.env.TITLE_INGEST_TOKEN || !process.env.SITE_BYPASS_TOKEN)
+if (!process.env.TITLE_INGEST_TOKEN)
   throw new Error('Collector secrets missing');
 const headers = {
   Authorization: `Bearer ${process.env.TITLE_INGEST_TOKEN}`,
-  'OAI-Sites-Authorization': `Bearer ${process.env.SITE_BYPASS_TOKEN}`,
 };
 const state = await fetch(site, {
   headers,

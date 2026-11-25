@@ -4,7 +4,6 @@ import { qwenNonThinkingPrompt } from './qwen-prompt.ts';
 type CronEnv = {
   SITE_BASE_URL: string;
   JOB_SECRET: string;
-  SITE_BYPASS_TOKEN?: string;
   AI: Ai;
   AI_RELAY_SECRET?: string;
 };
@@ -37,9 +36,6 @@ async function invokeSiteJob(
     'X-Scheduled-At': String(scheduledAtMs),
     'User-Agent': 'etfs-hot-topics-cron/0.1.0',
   });
-  if (env.SITE_BYPASS_TOKEN) {
-    headers.set('OAI-Sites-Authorization', `Bearer ${env.SITE_BYPASS_TOKEN}`);
-  }
   return fetch(url, {
     method: 'POST',
     headers,

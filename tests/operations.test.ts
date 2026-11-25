@@ -229,7 +229,7 @@ void test('same-hour success exits before upstream calls, skips fallback and wri
   const savedFetch = globalThis.fetch;
   const keys = [
     'TITLE_INGEST_TOKEN',
-    'SITE_BYPASS_TOKEN',
+    'SITE_BASE_URL',
     'GITHUB_STEP_SUMMARY',
     'GITHUB_OUTPUT',
   ];
@@ -243,7 +243,8 @@ void test('same-hour success exits before upstream calls, skips fallback and wri
     );
     await rm(dir, { recursive: true });
   });
-  process.env.TITLE_INGEST_TOKEN = process.env.SITE_BYPASS_TOKEN = 'test-only';
+  process.env.TITLE_INGEST_TOKEN = 'test-only';
+  process.env.SITE_BASE_URL = 'https://collector-test.example';
   process.env.GITHUB_STEP_SUMMARY = join(dir, 'summary.md');
   process.env.GITHUB_OUTPUT = join(dir, 'output.txt');
   let calls = 0;
@@ -251,7 +252,7 @@ void test('same-hour success exits before upstream calls, skips fallback and wri
     calls++;
     assert.match(
       input instanceof Request ? input.url : input.toString(),
-      /chatgpt.site\/api\/internal\/arctic-index$/,
+      /^https:\/\/collector-test\.example\/api\/internal\/arctic-index$/,
     );
     return Response.json(
       init?.method === 'POST'

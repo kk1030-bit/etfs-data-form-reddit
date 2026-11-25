@@ -119,16 +119,16 @@ void test('Invalid server retry values are marked as fallback so code changes cl
 void test('GitHub collector script transports cleaned tracking text and only projected queries (mocked network)', async (t) => {
   const original = globalThis.fetch;
   const previousIngest = process.env.TITLE_INGEST_TOKEN;
-  const previousBypass = process.env.SITE_BYPASS_TOKEN;
+  const previousBase = process.env.SITE_BASE_URL;
   t.after(() => {
     globalThis.fetch = original;
     if (previousIngest === undefined) delete process.env.TITLE_INGEST_TOKEN;
     else process.env.TITLE_INGEST_TOKEN = previousIngest;
-    if (previousBypass === undefined) delete process.env.SITE_BYPASS_TOKEN;
-    else process.env.SITE_BYPASS_TOKEN = previousBypass;
+    if (previousBase === undefined) delete process.env.SITE_BASE_URL;
+    else process.env.SITE_BASE_URL = previousBase;
   });
   process.env.TITLE_INGEST_TOKEN = 'test-only';
-  process.env.SITE_BYPASS_TOKEN = 'test-only';
+  process.env.SITE_BASE_URL = 'https://collector-test.example';
   let uploaded = false;
   const raw = post('abc123', {
     title: 'A question',
@@ -137,7 +137,15 @@ void test('GitHub collector script transports cleaned tracking text and only pro
   delete (raw as Record<string, unknown>).permalink;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input);
-    if (url.hostname === 'etfs-hot-topics.wangguancc.chatgpt.site') {
+    if (url.hostname === 'collector-test.example') {
+      assert.equal(
+        new Headers(init?.headers).get('Authorization'),
+        'Bearer test-only',
+      );
+      assert.equal(
+        new Headers(init?.headers).has('OAI-Sites-Authorization'),
+        false,
+      );
       if (init?.method !== 'POST')
         return Response.json({
           needed: true,

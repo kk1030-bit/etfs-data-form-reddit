@@ -8,20 +8,20 @@ import {
   observeArctic,
   writeWorkflowSummary,
 } from './workflow-summary.ts';
+import { siteEndpoint } from '../lib/site-config.mjs';
 
 const metrics = newWorkflowMetrics();
 async function collect() {
-  const endpoint =
-    'https://etfs-hot-topics.wangguancc.chatgpt.site/api/internal/deep-analysis';
+  const endpoint = siteEndpoint(
+    '/api/internal/deep-analysis',
+    process.env.SITE_BASE_URL,
+  );
   if (!process.env.TITLE_INGEST_TOKEN)
     throw new Error('Deep collector secret missing');
   const headers: Record<string, string> = {
     Authorization: `Bearer ${process.env.TITLE_INGEST_TOKEN}`,
     'Content-Type': 'application/json',
   };
-  if (process.env.SITE_BYPASS_TOKEN)
-    headers['OAI-Sites-Authorization'] =
-      `Bearer ${process.env.SITE_BYPASS_TOKEN}`;
   async function site(input: unknown) {
     const response = await fetch(endpoint, {
       method: 'POST',

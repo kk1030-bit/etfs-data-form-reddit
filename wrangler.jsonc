@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "etfs-hot-topics",
+  "account_id": "1a333a7fc271695b4531e55fe03339d6",
+  "main": "vinext/server/fetch-handler",
+  "compatibility_date": "2026-09-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": { "binding": "ASSETS", "directory": "./dist/client" },
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "etfs-hot-topics-db",
+      "database_id": "5869a517-af07-42a3-bf96-c506e60b38fc",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  "vars": {
+    "SITE_BASE_URL": "https://etfs-hot-topics.etfs-hot-topics-kk1030.workers.dev",
+    "ARCTIC_SHIFT_EXTERNAL": "1",
+    "TITLE_INDEX_EXTERNAL": "1",
+    "REDDIT_SOURCE_MODE": "arctic_shift",
+    "REDDIT_SUBREDDITS": "ETFs,investing,Bogleheads,stocks,StockMarket,dividends",
+    "REDDIT_RSS_SORT": "hot",
+    "REDDIT_USER_AGENT": "etfs-hot-topics-rss-preview/0.1",
+    "ETF_KEYWORDS": "etf,exchange traded fund,index fund,asset allocation,expense ratio,tracking error,VOO,VTI,VT,SPY,QQQ,QQQM,SCHD,VXUS,BND,AVUV,IWM,TLT,SGOV",
+    "RAW_CONTENT_RETENTION_HOURS": "48",
+    "WORKERS_AI_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8"
+  }
+}

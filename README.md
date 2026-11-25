@@ -2,7 +2,7 @@
 
 面向 Cloudflare 的公开 Reddit ETF 讨论观察站。当前生产来源是 **Arctic Shift 公开 Reddit 索引**，不是被限流的 Reddit RSS，不需要 Reddit OAuth 审批。
 
-网站：[etfs热门话题](https://etfs-hot-topics.wangguancc.chatgpt.site/)。访客无需登录即可阅读；网站公开权限由 Sites 托管访问策略管理，不写入 hosting.json。作业与采集导入端点仍分别要求 JOB_SECRET 或 TITLE_INGEST_TOKEN，密钥不会随网站公开。现有禁止搜索引擎索引的设置保持不变。
+网站：[etfs热门话题](https://etfs-hot-topics.etfs-hot-topics-kk1030.workers.dev/)。网站与 D1 部署在自己的 Cloudflare 账号中，访客无需登录即可阅读。作业与采集导入端点仍分别要求 JOB_SECRET 或 TITLE_INGEST_TOKEN，密钥不会随网站公开。现有禁止搜索引擎索引的设置保持不变。
 
 ## 当前行为
 
@@ -30,15 +30,15 @@ RSS 和 OAuth reader 保留为手动选择的适配器，不在限流时偷偷�
 
 ## 架构
 
-标题备援由本仓库的 GitHub Actions 标准 Ubuntu runner 每小时第 10 分钟读取一次公开 RSS，再经独立密钥送入 Cloudflare。公开仓库使用标准免费 runner；GitHub 排程可能延迟。网站、D1 和翻译仍在 Cloudflare，不依赖本地电脑。密钥仅保存在 Actions secrets 与 Sites 服务端环境。
+标题备援由本仓库的 GitHub Actions 标准 Ubuntu runner 每小时第 10、40 分钟检查，主采集不需要补位时跳过，再经独立密钥送入 Cloudflare。公开仓库使用标准免费 runner；GitHub 排程可能延迟。网站、D1 和翻译在 Cloudflare，不依赖本地电脑。密钥仅保存在 Actions secrets 与 Cloudflare Worker secrets。
 
-同一 GitHub Actions 管线也负责 Arctic Shift 采集与追踪刷新，经既有 TITLE_INGEST_TOKEN 提交到网站 /api/internal/arctic-index。ARCTIC_SHIFT_EXTERNAL=1 时，Cloudflare 小时任务不会直接请求 Arctic Shift；本版增加排程检查，在必要时补触发同一个 GitHub workflow。Cloudflare 仍负责验证、排名、D1、翻译及原有日报/周报。网站和 D1 由 .openai/hosting.json 管理，不依赖本地电脑。
+同一 GitHub Actions 管线也负责 Arctic Shift 采集与追踪刷新，经 TITLE_INGEST_TOKEN 提交到网站 /api/internal/arctic-index。ARCTIC_SHIFT_EXTERNAL=1 时，Cloudflare 小时任务不会直接请求 Arctic Shift；排程检查在必要时补触发同一个 GitHub workflow。Cloudflare 负责验证、排名、D1、翻译及原有日报/周报。网站和 D1 由根目录 wrangler.jsonc 管理；vite.config.ts 只使用 vinext 和 Cloudflare Vite 插件，不再读取 .openai/hosting.json。保留的旧 Sites manifest 仅供旧站识别与回退，不参与新站建置或发布。
 
 贴文投影字段为 id,title,created_utc,author,url,num_comments,over_18,subreddit,selftext,retrieved_on,link_flair_text。逐帖计数使用 `/api/comments/search/aggregate?link_id=t3_帖子ID&aggregate=subreddit&limit=1`：以 link_id **过滤**，而非按 link_id 分组；不用 after 滚动窗口，不读取 body。接受返回的整数字符串 count；空 data 数组为零，错误、超时或格式异常为未知，不视为零。绝不依赖刚归档的 score/num_comments 排名。User-Agent 包含本项目 GitHub 地址。
 
 逐帖请求沿用同一序列限速器（响应后间隔 2 秒、Remaining 耗尽或 429 停止并保留冷却）。Actions 聚合阶段最多 8 分钟，保留的 Worker 直连适配器最多 3 分钟以免超过来源锁期限；达到预算只保留实际完成的计数并提示覆盖缺口。新增 D1 迁移 `0008_bent_mandarin.sql` 保存 flair、逐帖总数、计数时间、增量与间隔；向后兼容已在执行的旧 runner 快照。发布顺序：先部署带迁移的网站，再更新 GitHub runner；两次有效观测后才有新增量。
 
-Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runner 标签与 GITHUB_SHA，Worker 使用构建时的 Git SHA。同一版本重跑不会重置；环境或版本变化时连续限流计数归零，并清除本程序计算的 fallback 冷却。有效服务器重置期限仍保留；无法识别来源的旧期限也不会自动清除。GitHub 排程是每小时 :10，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
+Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runner 标签与 GITHUB_SHA，Worker 使用构建时的 Git SHA。同一版本重跑不会重置；环境或版本变化时连续限流计数归零，并清除本程序计算的 fallback 冷却。有效服务器重置期限仍保留；无法识别来源的旧期限也不会自动清除。GitHub 排程是每小时 :10 和 :40，冷却结束后在下一个计划批次尝试，不代表保证立刻获取数据。
 
 ## 漏跑检查与补触发
 
@@ -49,7 +49,7 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 - 缺少专用 token、GitHub 拒绝请求或补发次数耗尽会明确提示异常；不会再以正常跳过掩盖这些问题。网页读取状态不会触发补发。
 - 状态页将最后排程检查和最近实际采集分开显示；当本小时 `:25` 后仍无本小时完成记录，立即标示未按时完成，不再等待 2.5 小时。`:25` 前也不会隐藏上一小时的缺口。
 
-启用前需在 **Sites 服务端秘密设置**配置 `GITHUB_ACTIONS_TOKEN`：仅授权本仓库 `kk1030-bit/etfs-data-form-reddit`、Actions 读写权限的 fine-grained token。不要复用本机 GitHub 登录 token，不要贴入聊天或提交 Git。此秘密不需要放进前端、GitHub workflow 或独立 Cron Worker。随后发布含新迁移的站点，再发布独立 Cron Worker 的新时刻表；只发布网页不会更新独立 Worker 的 Cron。
+启用前需用 `npx wrangler secret put GITHUB_ACTIONS_TOKEN --config wrangler.jsonc` 配置网站 Worker 的秘密：仅授权本仓库 `kk1030-bit/etfs-data-form-reddit`、Actions 读写权限的 fine-grained token。不要复用本机 GitHub 登录 token，不要贴入聊天或提交 Git。此秘密不需要放进前端、GitHub workflow 或独立 Cron Worker。随后发布含新迁移的站点，再发布独立 Cron Worker；只发布网页不会更新独立 Worker 的 Cron。
 
 发布后应同时核对状态页的排程检查记录与独立 Worker 的时刻表；配置秘密不等于已经发布。既有 GitHub 定时任务与手动执行不依赖这个新增秘密。测试同时覆盖 Node SQLite 和 Cloudflare 本地 D1 执行环境，避免遗漏托管环境的查询限制。
 
@@ -77,6 +77,19 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 验证命令：npm test、npm run typecheck、npm run build。独立 Cron 配置位于 cloudflare/wrangler.collector.jsonc，使用 npm run collector:deploy 发布。
 
+## 自有 Cloudflare 部署
+
+1. 使用 `npx wrangler whoami` 检查账号；需要重新授权时由操作者执行 `npx wrangler login`。不会自动开通付费方案。
+2. 根目录 `wrangler.jsonc` 指定网站 Worker `etfs-hot-topics`、D1 `etfs-hot-topics-db` 和绑定名 `DB`。只在首次建立时运行 `npx wrangler d1 create etfs-hot-topics-db`，把返回的 database_id 写入配置；已有数据库不要重建。
+3. `npm run db:remote` 套用全部 `drizzle/` migration。旧站数据需要另行导入，migration 不包含历史数据；导出、导入文件放在被 Git 忽略的 `outputs/`，不得提交。
+4. 用 `npx wrangler secret put KEY --config wrangler.jsonc` 的隐藏提示逐个设置 `JOB_SECRET`、`TITLE_INGEST_TOKEN`、`WORKERS_AI_RELAY_URL`、`WORKERS_AI_RELAY_TOKEN`、`GITHUB_ACTIONS_TOKEN`。不要把值放在命令参数、README 或 Git。`JOB_SECRET` 要与 collector 相同，relay token 要与 collector 的 `AI_RELAY_SECRET` 相同，ingest token 要与 GitHub Actions 同名 secret 相同。
+5. 执行 `npm test`、`npm run typecheck`、`npm run build`、`npm run deploy`。deploy 使用 Cloudflare Vite 插件生成的 `dist/server/wrangler.json`；不要直接部署未建置的入口，也不要再通过 Sites 发布。
+6. 新站 `/` 和 `/api/health` 验证正常、数据及密钥确认后，再运行 `npm run collector:deploy` 切换 Cron。Actions 的 `SITE_BASE_URL` 仓库变量可覆盖 `lib/site-config.mjs` 中的默认新网址；工作流不再要求 Sites bypass token。旧站保留，直到操作者另行决定停用。
+
+首次搬迁的数据核对结果见 [Cloudflare 数据迁移记录](docs/cloudflare-migration.md)。
+
+以后绑定自有域名时，更新网站和 collector 的 `SITE_BASE_URL` 以及 GitHub 同名仓库变量即可；不需要改写每个采集脚本。部署指南：[Cloudflare Vite 配置](https://developers.cloudflare.com/workers/vite-plugin/reference/api/)、[D1 命令](https://developers.cloudflare.com/d1/wrangler-commands/)。
+
 ## 环境变量
 
 | 变量                                         | 用途                                                            |
@@ -92,16 +105,15 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 | WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                                         |
 | OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                                        |
 | JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                                 |
-| SITE_BYPASS_TOKEN                            | 保留现有 Cron 与 Actions 的 Sites 调用凭据；不替代作业/导入密钥 |
-| TITLE_INGEST_TOKEN                           | Sites 与 Actions 共用的既有采集提交密钥                         |
+| TITLE_INGEST_TOKEN                           | 网站 Worker 与 Actions 共用的采集提交密钥                      |
 | ARCTIC_SHIFT_EXTERNAL                        | 生产为 1；Arctic Shift 仅由 GitHub Actions 请求                 |
 | GITHUB_ACTIONS_TOKEN                         | 仅本仓库 Actions 读写的服务端秘密，用于漏跑补触发               |
 | TITLE_INDEX_EXTERNAL                         | 生产为 1；关闭网站直接读取标题 RSS                              |
 | RAW_CONTENT_RETENTION_HOURS                  | 24–48，最高 48                                                  |
-| NEXT_PUBLIC_SITE_URL                         | 部署后可信 HTTPS 来源                                           |
+| SITE_BASE_URL                                | 网站 metadata、collector 和 Actions 使用的可信 HTTPS 来源      |
 | REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET      | 仅审批通过后的 OAuth 模式                                       |
 
-秘密只放服务端环境变量或本地忽略文件，不提交到 Git、hosting.json 或聊天。Sites 运行时变量修改后需重新发布应用。
+秘密只放 Cloudflare Worker secrets、Actions secrets 或本地忽略文件，不提交到 Git、wrangler.jsonc 或聊天。使用 wrangler secret put 更新网站秘密，普通非敏感变量记录在 wrangler.jsonc；collector 的秘密独立配置。
 
 ## 排程
 

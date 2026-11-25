@@ -11,6 +11,8 @@ on:
         default: false
 permissions:
   contents: read
+env:
+  SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
 concurrency:
   group: reddit-title-index
   cancel-in-progress: false
@@ -30,7 +32,6 @@ jobs:
         run: node --experimental-strip-types scripts/collect-arctic-index.ts
         env:
           TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
-          SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}
           ARCTIC_DIAGNOSTICS: ${{ inputs.diagnostics && '1' || '0' }}
       - name: Minimal Arctic curl probe (manual diagnostics only)
         if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.diagnostics }}
@@ -48,7 +49,6 @@ jobs:
         run: node scripts/collect-title-index.mjs
         env:
           TITLE_INGEST_TOKEN: ${{ secrets.TITLE_INGEST_TOKEN }}
-          SITE_BYPASS_TOKEN: ${{ secrets.SITE_BYPASS_TOKEN }}
       - name: Workflow outcome
         if: ${{ always() }}
         shell: bash

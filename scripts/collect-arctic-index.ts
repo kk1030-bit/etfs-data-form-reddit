@@ -14,18 +14,20 @@ import {
   writeWorkflowSummary,
   skipHourlyFallback,
 } from './workflow-summary.ts';
+import { siteEndpoint } from '../lib/site-config.mjs';
 
 const metrics = newWorkflowMetrics();
 async function collect() {
   const executionContext = collectorExecutionContext();
 
-  const endpoint =
-    'https://etfs-hot-topics.wangguancc.chatgpt.site/api/internal/arctic-index';
-  if (!process.env.TITLE_INGEST_TOKEN || !process.env.SITE_BYPASS_TOKEN)
+  const endpoint = siteEndpoint(
+    '/api/internal/arctic-index',
+    process.env.SITE_BASE_URL,
+  );
+  if (!process.env.TITLE_INGEST_TOKEN)
     throw new Error('Collector secrets missing');
   const headers = {
     Authorization: `Bearer ${process.env.TITLE_INGEST_TOKEN}`,
-    'OAI-Sites-Authorization': `Bearer ${process.env.SITE_BYPASS_TOKEN}`,
     'X-Collector-Context': executionContext,
   };
   const preparation = await fetch(endpoint, {

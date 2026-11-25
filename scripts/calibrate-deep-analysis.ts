@@ -6,6 +6,7 @@ import {
   type CalibrationRow,
 } from '../lib/collector/deep-analysis-calibration.ts';
 import type { DeepBackfill } from '../lib/collector/deep-analysis-source.ts';
+import { siteEndpoint } from '../lib/site-config.mjs';
 
 // Explicit invocation only. Never uploads the raw corpus to GitHub or publishes old posts.
 const inputPath = resolve(
@@ -54,7 +55,7 @@ let attempts = 0;
 for (const post of posts) {
   if (attempts >= 40) break; // Server enforces 40/day across runs, including retries, under global 128/day.
   const response = await fetch(
-    'https://etfs-hot-topics.wangguancc.chatgpt.site/api/internal/deep-analysis',
+    siteEndpoint('/api/internal/deep-analysis', process.env.SITE_BASE_URL),
     {
       method: 'POST',
       headers: {
