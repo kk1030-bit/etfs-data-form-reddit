@@ -1,5 +1,4 @@
 import { inspectSiteJobResponse } from './cron-result.ts';
-import { qwenNonThinkingPrompt } from './qwen-prompt.ts';
 
 type CronEnv = {
   SITE_BASE_URL: string;
@@ -88,11 +87,10 @@ export default {
           role: 'system' | 'user';
           content: string;
         }>;
-        const result = await env.AI.run('@cf/qwen/qwen3-30b-a3b-fp8', {
-          ...(deep
-            ? { prompt: qwenNonThinkingPrompt(messages), raw: true }
-            : { messages }),
-          max_tokens: deep ? 2000 : 1000,
+        const result = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+          messages,
+          response_format: { type: 'json_object' },
+          max_completion_tokens: deep ? 2000 : 1000,
           temperature: 0.1,
         });
         return json(result);

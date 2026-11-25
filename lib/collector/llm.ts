@@ -113,7 +113,7 @@ function responseText(payload: unknown): string {
 
 function workersAiModel(env: LlmEnv): string {
   const configured = env.WORKERS_AI_MODEL?.trim();
-  const model = configured || '@cf/meta/llama-3.2-3b-instruct';
+  const model = configured || '@cf/google/gemma-4-26b-a4b-it';
   if (!/^@cf\/[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(model)) {
     throw new Error('WORKERS_AI_MODEL 格式无效');
   }
@@ -212,7 +212,7 @@ async function workersAiStructuredResponse(
         role: 'system',
         content: `${instructions}\n只输出 JSON，不要输出 Markdown。JSON 必须符合这个 schema：${JSON.stringify(schema)}`,
       },
-      { role: 'user', content: `${input}\n/no_think` },
+      { role: 'user', content: input },
     ],
     max_tokens: purpose ? 2000 : 1000,
     temperature: 0.1,

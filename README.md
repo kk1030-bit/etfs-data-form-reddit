@@ -67,7 +67,7 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 
 ## 零付款 AI
 
-生产使用 @cf/qwen/qwen3-30b-a3b-fp8，Cloudflare Workers Free 方案。D1 原子计数限制 **128 次请求 / UTC 日**；小时请求最多 6,000 UTF-8 输入字节、1,000 输出 tokens；深度审查最多 18,000 输入字节、2,000 输出 tokens。失败和重试也计数。这个上限不是免费额度余额的精确读数，账户其他 AI 用量也会占用额度。达到免费额度或应用上限即暂停，不自动升级；未配置付费备用密钥。
+生产使用 `@cf/google/gemma-4-26b-a4b-it`，Cloudflare Workers Free 方案。D1 原子计数限制 **128 次请求 / UTC 日**；小时请求最多 6,000 UTF-8 输入字节、1,000 输出 tokens；深度审查最多 18,000 输入字节、2,000 输出 tokens。失败和重试也计数。这个上限不是免费额度余额的精确读数，账户其他 AI 用量也会占用额度。达到免费额度或应用上限即暂停，不自动升级；未配置付费备用密钥。
 
 深度分析采用本地相对排名：正文至少 1,000 字符及主题资格，20 分地板，初评前 10 查询互动后选前 5 送 AI。AI 按论证／数据／阅读价值各 1–5 分、合计至少 9 分放行。页面分为「精选」与折叠「候选长文」，详见 [深度分析规范](docs/deep-analysis.md)。
 
@@ -103,7 +103,7 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 | WORKERS_AI_RELAY_TOKEN                       | 网站端 AI 密钥，与 Worker 的 AI_RELAY_SECRET 相同               |
 | AI_RELAY_SECRET                              | 仅配置独立 Worker，不与 JOB_SECRET 混用                         |
 | AI binding                                   | 独立 Worker 上的原生 Workers AI                                 |
-| WORKERS_AI_MODEL                             | relay 固定 Qwen；直连适配器可用此变量                           |
+| WORKERS_AI_MODEL                             | relay 固定 Gemma 4；直连适配器可用此变量                         |
 | WORKERS_AI_ACCOUNT_ID / WORKERS_AI_API_TOKEN | 可选直连 REST；生产不用                                         |
 | OPENAI_API_KEY / OPENAI_MODEL                | 可选付费备用；生产不配置                                        |
 | JOB_SECRET                                   | 网站与 Cron Worker 共用作业密钥                                 |

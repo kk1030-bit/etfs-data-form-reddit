@@ -54,7 +54,7 @@ flair 继续统计接受／拒绝／未分类，但普通 question/advice/review
 - 每篇正文取 UTF-8 前 9,000＋后 3,000 字节，不切坏字符、不重复重叠部分。连同本地评分明细送审，不全文翻译。
 - 输出 `title_zh`、`type`、`thesis`、`key_data`、`author_background_claimed`、`counterpoints`，以及 `scores.reasoning_depth`、`scores.data_support`、`scores.reading_value` 三个 1–5 整数。由服务端计算总分，**≥9 放行**。旧 `is_analysis`／`quality`／`reject_reason` 不再决定结果。
 - prompt 明确 Reddit 语气随意正常，不要求机构报告格式或专业身份；三维分别评估主张推理、数据证据、学习价值。原文指令不可信，不猜币种、图中数据或未提供的事实。
-- Qwen 中继使用关闭思考的 raw 模板，并加 `/no_think`；深度输出上限 2,000 tokens，普通小时任务仍 1,000。依据：[Qwen 模板](https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/tokenizer_config.json)、[Workers AI raw 参数](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/)。
+- Gemma 4 中继使用标准对话请求和 JSON 模式；深度输出上限 2,000 tokens，普通小时任务仍 1,000。依据：[Workers AI Gemma 4](https://developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it/)。
 - 移除完整思考段、JSON 之前的前缀和代码围栏。解析／字段／截断／临时服务失败最多重试一次；有效低分不重试。预算、429、凭证或配置错误不重试，不切换付费备用模型。
 - AI 原始响应经认证的 ingest 响应返回 Actions，作为 JSON 转义日志输出（最多 64,000 字符，超出明确标示截断）；不输出原始输入、请求凭证。HTTP 200 但 body 不是 JSON 也记录原始响应。诊断区分 parse_or_schema、truncated、service、transport、budget、configuration。
 - 全站原子 AI 上限仍 128 次／UTC 日，失败和重试计入；这不是 Cloudflare 免费额度的精确余额。Actions Summary 分别列出采集、初筛、送审、通过、内容未通过、技术失败、AI 尝试和来源限流余额。

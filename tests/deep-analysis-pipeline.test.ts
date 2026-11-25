@@ -732,17 +732,12 @@ void test('relay allows the deep excerpt size only for authenticated deep reques
     JOB_SECRET: 'job',
     AI_RELAY_SECRET: 'relay-secret',
     AI: {
-      run: async (_model: string, input: Record<string, unknown>) => {
+      run: async (model: string, input: Record<string, unknown>) => {
         calls++;
-        outputTokens = Number(input.max_tokens);
-        if (outputTokens === 2000) {
-          assert.equal(input.raw, true);
-          assert.match(
-            String(input.prompt),
-            /<\|im_start\|>assistant\n<think>\n\n<\/think>\n\n$/,
-          );
-          assert.equal(input.messages, undefined);
-        } else assert.ok(Array.isArray(input.messages));
+        assert.equal(model, '@cf/google/gemma-4-26b-a4b-it');
+        outputTokens = Number(input.max_completion_tokens);
+        assert.deepEqual(input.response_format, { type: 'json_object' });
+        assert.ok(Array.isArray(input.messages));
         return { response: JSON.stringify(ai()) };
       },
     },

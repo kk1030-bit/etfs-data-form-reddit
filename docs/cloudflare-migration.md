@@ -45,3 +45,9 @@
 - 未授权的小时作业、Arctic Shift 导入和深度分析导入请求返回 401。
 - 切换 collector 与 GitHub Actions 前，必须配置 `TITLE_INGEST_TOKEN` 和 `GITHUB_ACTIONS_TOKEN`；前者须与 Actions 同名 secret 一致。
 - 旧 Sites 网站及数据库保留；停用或删除须由操作者另行决定。
+
+## 2026-11-25 切换实测
+
+- 两条 Actions 工作流已重新启用，`SITE_BASE_URL` 指向新站。小时采集在北京时间 19:49 写入 5 篇榜单，collector 的 `:50` 定时检查在新 D1 记为完成。
+- 深度分析工作流已在新 D1 写入本日运行记录。原模型已停用，这轮 5 篇审查因 AI relay 返回 503 而失败。已改用 Gemma 4 并验证一般与深度请求都能返回中文 JSON；下一次正式日批次仍需验证。
+- `GITHUB_ACTIONS_TOKEN` 已存在。首次补触发检查的 GitHub runs API 返回 HTTP 400，补触发尚待复验。正常 Actions 排程与从 GitHub 手动触发使用各自的授权路径。

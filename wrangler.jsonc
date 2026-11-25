@@ -27,6 +27,6 @@
     "REDDIT_USER_AGENT": "etfs-hot-topics-rss-preview/0.1",
     "ETF_KEYWORDS": "etf,exchange traded fund,index fund,asset allocation,expense ratio,tracking error,VOO,VTI,VT,SPY,QQQ,QQQM,SCHD,VXUS,BND,AVUV,IWM,TLT,SGOV",
     "RAW_CONTENT_RETENTION_HOURS": "48",
-    "WORKERS_AI_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8"
+    "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it"
   }
 }
