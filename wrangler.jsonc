@@ -4,7 +4,7 @@
   "account_id": "1a333a7fc271695b4531e55fe03339d6",
   "main": "vinext/server/fetch-handler",
   "compatibility_date": "2026-09-02",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
   "preview_urls": false,
   "assets": { "binding": "ASSETS", "directory": "./dist/client" },

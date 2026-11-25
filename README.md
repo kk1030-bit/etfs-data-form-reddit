@@ -86,6 +86,8 @@ Arctic Shift 退避状态记录执行环境与代码版本：GitHub 使用 runne
 5. 执行 `npm test`、`npm run typecheck`、`npm run build`、`npm run deploy`。deploy 使用 Cloudflare Vite 插件生成的 `dist/server/wrangler.json`；不要直接部署未建置的入口，也不要再通过 Sites 发布。
 6. 新站 `/` 和 `/api/health` 验证正常、数据及密钥确认后，再运行 `npm run collector:deploy` 切换 Cron。Actions 的 `SITE_BASE_URL` 仓库变量可覆盖 `lib/site-config.mjs` 中的默认新网址；工作流不再要求 Sites bypass token。旧站保留，直到操作者另行决定停用。
 
+网站和 collector 的 Wrangler 配置都使用 `global_fetch_strictly_public`，允许同区的 `workers.dev` Worker 经 HTTPS 互相调用。Cron 和 AI relay 仍分别验证作业密钥和 relay 密钥。参见 [Cloudflare 1042 错误说明](https://developers.cloudflare.com/workers/observability/errors/#error-pages-generated-by-workers)。
+
 首次搬迁的数据核对结果见 [Cloudflare 数据迁移记录](docs/cloudflare-migration.md)。
 
 以后绑定自有域名时，更新网站和 collector 的 `SITE_BASE_URL` 以及 GitHub 同名仓库变量即可；不需要改写每个采集脚本。部署指南：[Cloudflare Vite 配置](https://developers.cloudflare.com/workers/vite-plugin/reference/api/)、[D1 命令](https://developers.cloudflare.com/d1/wrangler-commands/)。
